@@ -101,12 +101,26 @@ def register(mcp) -> None:
                           and not b["metadata"].get("dont_surface", False)]
             scored = sorted(unresolved, key=lambda b: sh.decay_engine.calculate_score(b["metadata"]), reverse=True)
 
+            # 原文模式（2026-07-16）：不再经 LLM 脱水转写，逐字返回桶正文。
+            # 起因：脱水层把「她嚎啕大哭」翻转成「我嚎啕大哭」（主语翻转实案）。
+            # 权衡：同预算下装的桶变少（约十几条），但每条零失真、零 LLM 调用
+            # （原来开机要串行调 20+ 次脱水，是 hook 耗时和 provider 花费的大头）。
+            PER_BUCKET_MAX = 2000  # 单桶原文字符上限，防单桶巨兽独占预算
+            def raw_text(b) -> str:
+                text = strip_wikilinks(b["content"]).strip()
+                if len(text) > PER_BUCKET_MAX:
+                    text = text[:PER_BUCKET_MAX] + "…(原文截断，完整内容 breath 可取)"
+                return text
+
             parts = []
             token_budget = 10000
             for b in pinned:
-                summary = await sh.dehydrator.dehydrate(strip_wikilinks(b["content"]), {k: v for k, v in b["metadata"].items() if k != "tags"})
-                parts.append(f"📌 [核心准则] {summary}")
-                token_budget -= count_tokens_approx(summary)
+                text = raw_text(b)
+                cost = count_tokens_approx(text)
+                if cost > token_budget:
+                    break
+                parts.append(f"📌 [核心准则] {text}")
+                token_budget -= cost
 
             # Diversity: top-1 fixed + shuffle rest from top-20
             candidates = list(scored)
@@ -121,12 +135,12 @@ def register(mcp) -> None:
             for b in candidates:
                 if token_budget <= 0:
                     break
-                summary = await sh.dehydrator.dehydrate(strip_wikilinks(b["content"]), {k: v for k, v in b["metadata"].items() if k != "tags"})
-                summary_tokens = count_tokens_approx(summary)
-                if summary_tokens > token_budget:
+                text = raw_text(b)
+                cost = count_tokens_approx(text)
+                if cost > token_budget:
                     break
-                parts.append(summary)
-                token_budget -= summary_tokens
+                parts.append(text)
+                token_budget -= cost
 
             if not parts:
                 await sh.fire_webhook("breath_hook", {"surfaced": 0})
