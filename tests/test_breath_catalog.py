@@ -105,7 +105,7 @@ async def test_catalog_marks_pinned(bucket_mgr):
 
     out = await surface_catalog()
     # pinned 桶创建时名字会带时间戳前缀，所以分开断言：📌 标记在行内、名字在行内
-    line = next(l for l in out.split("\n") if "核心准则" in l)
+    line = next(row for row in out.split("\n") if "核心准则" in row)
     assert line.startswith("📌")
 
 
@@ -131,6 +131,32 @@ async def test_dispatch_catalog_respects_domain_filter(bucket_mgr):
     out = await dispatch(domain="工作", catalog=True)
     assert "工作项" in out
     assert "生活项" not in out
+
+
+@pytest.mark.asyncio
+async def test_dispatch_catalog_respects_tags_and_max_results(bucket_mgr):
+    await bucket_mgr.create(content="x", name="命中高", tags=["拥抱"], importance=9)
+    await bucket_mgr.create(content="y", name="命中低", tags=["拥抱"], importance=5)
+    await bucket_mgr.create(content="z", name="不命中", tags=["其他"], importance=10)
+    install_runtime(bucket_mgr)
+
+    out = await dispatch(tags="拥抱", catalog=True, max_results=1)
+
+    assert "命中高" in out
+    assert "命中低" not in out
+    assert "不命中" not in out
+    assert "1 桶" in out
+
+
+@pytest.mark.asyncio
+async def test_dispatch_catalog_missing_tag_returns_empty(bucket_mgr):
+    await bucket_mgr.create(content="x", name="目录项", tags=["已存在"])
+    install_runtime(bucket_mgr)
+
+    out = await dispatch(tags="definitely_missing", catalog=True, max_results=5)
+
+    assert "没有匹配过滤条件" in out
+    assert "目录项" not in out
 
 
 @pytest.mark.asyncio
