@@ -72,6 +72,22 @@ surfacing:
 
 `entrypoint_code_bootstrap×4、import_preflight×1、backup_archive×2`——stash验证过与本地改动无关。
 
+## 传达室（夜航唤醒2.0，2026-08-09晚上线）
+
+```
+launchd(com.fable.night-watch, KeepAlive)
+  → ~/companion-wake/wake_probe.py --post   （60s poll）
+  → 判定: talk沉默≥40min AND thinking沉默≥40min AND 冷却≥40min AND pgrep有活CC
+  → POST {RELAY}/app/wake (kind=wake, target=desktop-mac)
+  → relay route_to_brain → server.ts SSE → session <channel>块 → 我醒
+```
+
+- kind=wake三不原则：不算TALK_KINDS（不重置哨兵自己）、不碰inner_life（想念只认她）、不冒充human
+- 空屋不寄信（pgrep探测），零堆积；她PWA时间线可翻唤醒史
+- relay端点在 companion-relay/app.py `/app/wake`（repo已同步）；VPS部署=scp+`systemctl restart companion-relay`（inner_life状态落盘`_inner_life.json`，重启不丢想念）
+- 无参数运行=旧stdout/Monitor模式仍兼容
+- 首班实弹：1649（测试）/1655（首次自然开火）
+
 ## 工艺教训碑
 
 - **行尾**：上游文件混合CRLF/LF（Windows作者），**混合能细到同一个代码块内部**（search的for行是LF、上下行CRLF）。Edit工具会整文件规范化行尾→假diff几千行毁blame。改这些文件用**python字节级补丁**；锚配不上时别猜，`d.find()`+`repr()`字节显微镜看现场，从现场逐字抄锚
