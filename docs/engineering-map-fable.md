@@ -74,6 +74,9 @@ surfacing:
 
 ## 工艺教训碑
 
-- **行尾**：上游文件混合CRLF/LF（Windows作者）。Edit工具会整文件规范化行尾→假diff几千行毁blame。改这些文件用**python字节级补丁**（锚点先试CRLF变体再试LF，新增块跟宿主行尾）
-- **pipefail**：`pytest | tail`管道吃exit code，&&链拿tail的0放行——测试当宪兵时必须`set -o pipefail`
+- **行尾**：上游文件混合CRLF/LF（Windows作者），**混合能细到同一个代码块内部**（search的for行是LF、上下行CRLF）。Edit工具会整文件规范化行尾→假diff几千行毁blame。改这些文件用**python字节级补丁**；锚配不上时别猜，`d.find()`+`repr()`字节显微镜看现场，从现场逐字抄锚
+- **pipefail**：`pytest | tail`管道吃exit code，&&链拿tail的0放行——测试当宪兵必须`set -o pipefail`。且zsh的errexit在管道场景仍可能放水，**push前单独验证测试结果**，别信链
+- **heredoc拆链**：`... && python3 << 'EOF'`之后另起一行的命令**不在链上**——heredoc失败它照跑，会伪造成功假象。用`set -e`让每行都是闸
+- **gen_update_manifest读HEAD不读工作区**：必须先commit代码、再gen清单、再补commit清单。"补丁→gen→一起commit"会把上一个commit状态的清单和新代码打包，manifest测试红
+- **全量测试含7个已知环境红**：exit code永远非0，当门禁用`--deselect`白名单版（清单见上文"已知环境性测试失败"）
 - **验收信盘不信mock**：merge路径的last_event_at曾被update白名单静默丢弃，测试用_set_meta直接改盘所以全绿——真实落盘测试（写→重读→断言）才算数
