@@ -291,6 +291,110 @@ async def test_weighted_limit_yields_seats_to_recency(bucket_mgr, decay_eng):
 
 
 # ------------------------------------------------------------
+# 印象席（巩固仪式配套，外审验收①②④）
+# ------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_digest_excluded_from_recency_and_seated_as_impression(
+    bucket_mgr, decay_eng
+):
+    """摘要桶不占近期原文席位，入印象席，且全场只出现一次。"""
+    install_runtime(bucket_mgr, decay_eng, _layered_cfg())
+    now = datetime.now()
+
+    dg = await bucket_mgr.create(
+        content="本周印象：修呼吸的一周ZZZ", importance=8,
+        tags=["digest", "周摘", "pend_20260809"], domain=["沉淀物"],
+    )
+    ts = _iso(now - timedelta(hours=1))
+    _set_meta(bucket_mgr, dg, created=ts, last_event_at=ts)
+
+    for i in range(2):
+        bid = await bucket_mgr.create(content=f"普通近期记忆{i}号", importance=5)
+        t2 = _iso(now - timedelta(hours=i + 2))
+        _set_meta(bucket_mgr, bid, created=t2, last_event_at=t2)
+
+    result = await surface_default(max_results=10, max_tokens=20000, tag_filter=[])
+    recency = _section(result, "近期原文")
+    impression = _section(result, "印象")
+
+    assert "本周印象：修呼吸的一周ZZZ" not in recency, "摘要不得占近期原文席"
+    assert "本周印象：修呼吸的一周ZZZ" in impression, "最新摘要应坐印象席"
+    assert "📖 [印象]" in impression
+    assert result.count("本周印象：修呼吸的一周ZZZ") == 1, "全场只出现一次"
+    assert "普通近期记忆0号" in recency and "普通近期记忆1号" in recency
+
+
+@pytest.mark.asyncio
+async def test_impression_sorted_by_pend_not_created(bucket_mgr, decay_eng):
+    """外审①：后补的旧周摘（created 更新）不得篡位最新印象。"""
+    install_runtime(bucket_mgr, decay_eng, _layered_cfg())
+    now = datetime.now()
+
+    old_backfilled = await bucket_mgr.create(
+        content="后补的第31周旧摘要", importance=8,
+        tags=["digest", "周摘", "pend_20260802"], domain=["沉淀物"],
+    )
+    _set_meta(bucket_mgr, old_backfilled,
+              created=_iso(now - timedelta(hours=1)),
+              last_event_at=_iso(now - timedelta(hours=1)))  # created 最新
+
+    current = await bucket_mgr.create(
+        content="第32周的当周摘要", importance=8,
+        tags=["digest", "周摘", "pend_20260809"], domain=["沉淀物"],
+    )
+    _set_meta(bucket_mgr, current,
+              created=_iso(now - timedelta(days=2)),
+              last_event_at=_iso(now - timedelta(days=2)))  # created 更旧
+
+    result = await surface_default(max_results=10, max_tokens=20000, tag_filter=[])
+    impression = _section(result, "印象")
+
+    assert "第32周的当周摘要" in impression, "pend 更大者应入席，不看 created"
+    assert "后补的第31周旧摘要" not in impression, "后补旧摘要不得篡位"
+    # 落选摘要仍可从其他池出货（外审④）
+    assert "后补的第31周旧摘要" in result
+
+
+@pytest.mark.asyncio
+async def test_digest_without_pend_tag_never_takes_seat(bucket_mgr, decay_eng):
+    """无 pend_ 标签的不合规 digest 桶不入印象席，但仍走权重池。"""
+    install_runtime(bucket_mgr, decay_eng, _layered_cfg())
+    now = datetime.now()
+    old = _iso(now - timedelta(days=10))
+
+    dg = await bucket_mgr.create(
+        content="没有周期标签的野摘要", importance=8,
+        tags=["digest", "周摘"], domain=["沉淀物"],
+    )
+    _set_meta(bucket_mgr, dg, created=old, last_event_at=old)
+
+    result = await surface_default(max_results=10, max_tokens=20000, tag_filter=[])
+    assert _section(result, "印象") == "", "无 pend 标签不得入印象席"
+    assert "没有周期标签的野摘要" in result, "但仍应从权重池出货"
+
+
+@pytest.mark.asyncio
+async def test_wikilink_source_ids_reachable_via_search(bucket_mgr, decay_eng):
+    """外审②务实版：正文含 [[来源桶id]] → 用该 id 检索必须命中摘要。
+
+    现有 concept 图谱的节点是概念词而非桶，[[bucket_id]] 建不成桶间引用边
+    （已另立提案）。本测试锁住的是检索可达：顺着来源 id 能钓回摘要。
+    """
+    install_runtime(bucket_mgr, decay_eng, _layered_cfg())
+
+    src = await bucket_mgr.create(content="某个具体事件的原始记录", importance=5)
+    dg = await bucket_mgr.create(
+        content=f"本周印象正文。覆盖来源：[[{src}]]", importance=8,
+        tags=["digest", "周摘", "pend_20260809"], domain=["沉淀物"],
+    )
+
+    hits = await bucket_mgr.search(src, limit=10)
+    hit_ids = {h.get("id") for h in hits}
+    assert dg in hit_ids, "用来源桶 id 检索必须能命中引用它的摘要"
+
+
+# ------------------------------------------------------------
 # last_event_at 真实落盘（官端 sol 判词：不能只检查 mock 收到了参数）
 # ------------------------------------------------------------
 

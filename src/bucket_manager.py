@@ -3020,7 +3020,18 @@ class BucketManager:
                 if str(b.get("id")) == q_exact:
                     hit = dict(b)
                     hit["score"] = 1.0
-                    return [hit]
+                    # Backlink extension: buckets whose body mentions this
+                    # id (e.g. digest [[wikilink]] references) ride along
+                    # after the exact hit. Ordinary keyword queries never
+                    # reach this branch, so "id is pure locator" holds.
+                    # 反链扩展：正文提及此 id 的桶（如摘要 [[引用]]）附在本尊之后。
+                    referrers = [
+                        dict(rb, score=0.9)
+                        for rb in searchable_buckets
+                        if str(rb.get("id")) != q_exact
+                        and q_exact in (rb.get("content") or "")
+                    ]
+                    return [hit] + referrers[: max(0, limit - 1)]
 
         # --- Layer 1: domain pre-filter (fast scope reduction) ---
         # --- 第一层：主题域预筛（快速缩小范围）---

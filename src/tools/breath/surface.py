@@ -498,6 +498,8 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
     for b in unresolved:
         if parse_bool(b["metadata"].get("imported"), default=False):
             continue  # 批量导入桶的时间是导入时刻，不冒充近期
+        if "digest" in (b["metadata"].get("tags") or []):
+            continue  # 摘要桶不占近期原文席位，另有印象席
         dt = _event_dt(b)
         if dt is None or dt > now:
             continue  # 非法时间只排除该桶；未来时间不得霸榜
@@ -531,6 +533,42 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
             token_budget -= entry_tokens
         except Exception as e:
             rt.logger.warning(f"recency render failed / 近期渲染失败: {e}")
+
+    # --- 印象席（巩固仪式配套）: 最新一篇摘要常驻 1 席 ---
+    # 排序按 pend_YYYYMMDD 标签（周期终点）而非 created：
+    # 后补的旧周摘不得篡位最新印象（外审验收①）。
+    # 无 pend_ 标签的 digest 桶不入席（仍走权重池）。
+    def _pend_key(b: dict) -> str:
+        for t in (b["metadata"].get("tags") or []):
+            if isinstance(t, str) and t.startswith("pend_") and t[5:].isdigit():
+                return t[5:]
+        return ""
+
+    impression_results = []
+    impression_ids: set = set()
+    digest_pool = [
+        b for b in unresolved
+        if "digest" in (b["metadata"].get("tags") or [])
+        and _pend_key(b)
+        and b["id"] not in recency_ids
+    ]
+    if digest_pool:
+        digest_pool.sort(
+            key=lambda b: (_pend_key(b), str(b.get("id") or "")), reverse=True
+        )
+        top = digest_pool[0]
+        try:
+            rendered, entry_tokens = render_stored_bucket(
+                top, f"📖 [印象] [bucket_id:{top['id']}]", _footprint(top)
+            )
+            if entry_tokens <= token_budget:
+                impression_results.append(rendered)
+                impression_ids.add(top["id"])
+                token_budget -= entry_tokens
+            else:
+                primary_omitted += 1
+        except Exception as e:
+            rt.logger.warning(f"impression render failed / 印象渲染失败: {e}")
 
     # --- 域劈分（v3 新增）---
     tech_cfg = layered_cfg.get("tech_index", {}) or {}
@@ -570,7 +608,10 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
             return False  # 高重要度技术记忆豁免降级
         return all(x in tech_domains for x in doms)  # 混合域保护：全属才降级
 
-    rest = [b for b in unresolved if b["id"] not in recency_ids]
+    rest = [
+        b for b in unresolved
+        if b["id"] not in recency_ids and b["id"] not in impression_ids
+    ]
     if tech_enabled and tech_domains:
         tech_pool = [b for b in rest if _is_tech_only(b)]
         tech_pool_ids = {b["id"] for b in tech_pool}
@@ -696,6 +737,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
     if (
         not pinned_results
         and not recency_results
+        and not impression_results
         and not dynamic_results
         and not tech_results
     ):
@@ -727,6 +769,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
         seven_days_ago = now - timedelta(days=7)
         already = (
             recency_ids
+            | impression_ids
             | {b["id"] for b in candidates}
             | tech_shown_ids
         )
@@ -773,6 +816,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
         try:
             shown_ids = (
                 recency_ids
+                | impression_ids
                 | {b["id"] for b in candidates}
                 | tech_shown_ids
             )
@@ -812,6 +856,8 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
         parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
     if recency_results:
         parts.append("=== 近期原文 ===\n" + "\n---\n".join(recency_results))
+    if impression_results:
+        parts.append("=== 印象 ===\n" + "\n---\n".join(impression_results))
     if dynamic_results:
         parts.append("=== 有体温的浮现 ===\n" + "\n---\n".join(dynamic_results))
     if tech_results:
