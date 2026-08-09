@@ -595,6 +595,16 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
             return [s for s in (str(x).strip() for x in d) if s]
         return []
 
+    protect_domains = set(
+        s for s in (
+            str(x).strip() for x in (
+                tech_cfg.get("protect_domains")
+                or ["恋爱", "内心", "自省", "情绪", "心理", "沉淀物",
+                    "家庭", "友谊", "人际", "社交", "日常", "self"]
+            )
+        ) if s
+    )
+
     def _is_tech_only(b: dict) -> bool:
         meta = b["metadata"]
         doms = _domains_of(meta)
@@ -606,7 +616,9 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
             imp = 5
         if imp >= tech_exempt:
             return False  # 高重要度技术记忆豁免降级
-        return all(x in tech_domains for x in doms)  # 混合域保护：全属才降级
+        if any(x in protect_domains for x in doms):
+            return False  # 保护域一票否决（库主80/20判例：AI域≠技术域）
+        return any(x in tech_domains for x in doms)  # 索引域在场即索引
 
     rest = [
         b for b in unresolved

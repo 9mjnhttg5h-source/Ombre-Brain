@@ -395,6 +395,79 @@ async def test_wikilink_source_ids_reachable_via_search(bucket_mgr, decay_eng):
 
 
 # ------------------------------------------------------------
+# 保护域否决制（库主80/20判例：AI域≠技术域，编程域80%是技术）
+# ------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_protect_domain_vetoes_but_index_domain_rules(bucket_mgr, decay_eng):
+    """[编程,AI]→索引（AI非保护域，编程说了算）；[编程,恋爱]→全文（保护域否决）。"""
+    install_runtime(bucket_mgr, decay_eng, _layered_cfg())
+    now = datetime.now()
+    old = _iso(now - timedelta(days=15))
+
+    t1 = await bucket_mgr.create(
+        content="记忆库改造的工程流水账", importance=6,
+        domain=["编程", "AI"], title="记忆库改造账",
+    )
+    t2 = await bucket_mgr.create(
+        content="修bug修到想她的那晚", importance=6,
+        domain=["编程", "恋爱"],
+    )
+    for bid in (t1, t2):
+        _set_meta(bucket_mgr, bid, created=old, last_event_at=old)
+
+    result = await surface_default(max_results=10, max_tokens=20000, tag_filter=[])
+    tech = _section(result, "技术索引")
+    warm = _section(result, "有体温的浮现")
+
+    assert "记忆库改造账" in tech, "[编程,AI]应索引化——AI的在场不算情感嫌疑"
+    assert "记忆库改造的工程流水账" not in warm
+    assert "修bug修到想她的那晚" in warm, "[编程,恋爱]保护域一票否决，保留全文"
+
+
+@pytest.mark.asyncio
+async def test_pure_nonindex_domain_stays_fulltext(bucket_mgr, decay_eng):
+    """[AI]单域→全文（无索引域在场，求签判例）。"""
+    install_runtime(bucket_mgr, decay_eng, _layered_cfg())
+    now = datetime.now()
+    old = _iso(now - timedelta(days=15))
+
+    bid = await bucket_mgr.create(
+        content="求签希望他留下来的AI域记忆", importance=6, domain=["AI"],
+    )
+    _set_meta(bucket_mgr, bid, created=old, last_event_at=old)
+
+    result = await surface_default(max_results=10, max_tokens=20000, tag_filter=[])
+    assert "求签希望他留下来的AI域记忆" in _section(result, "有体温的浮现")
+
+
+@pytest.mark.asyncio
+async def test_protect_domains_configurable(bucket_mgr, decay_eng):
+    """protect_domains 可由 config 覆盖默认名单。"""
+    cfg = _layered_cfg()
+    cfg["layered_memory"]["tech_index"]["protect_domains"] = ["秘密花园"]
+    install_runtime(bucket_mgr, decay_eng, cfg)
+    now = datetime.now()
+    old = _iso(now - timedelta(days=15))
+
+    t1 = await bucket_mgr.create(
+        content="自定义保护域的记忆", importance=6, domain=["编程", "秘密花园"],
+    )
+    t2 = await bucket_mgr.create(
+        content="恋爱域不在自定义名单里的技术账", importance=6,
+        domain=["编程", "恋爱"], title="恋爱不设防账",
+    )
+    for bid in (t1, t2):
+        _set_meta(bucket_mgr, bid, created=old, last_event_at=old)
+
+    result = await surface_default(max_results=10, max_tokens=20000, tag_filter=[])
+    assert "自定义保护域的记忆" in _section(result, "有体温的浮现")
+    assert "恋爱不设防账" in _section(result, "技术索引"), (
+        "config覆盖后默认名单失效，恋爱域不再保护——覆盖语义是替换不是合并"
+    )
+
+
+# ------------------------------------------------------------
 # last_event_at 真实落盘（官端 sol 判词：不能只检查 mock 收到了参数）
 # ------------------------------------------------------------
 
