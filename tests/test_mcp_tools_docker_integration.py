@@ -1,4 +1,4 @@
-"""Real streamable-HTTP integration coverage for all 14 public MCP tools.
+"""Real streamable-HTTP integration coverage for all public MCP tools.
 
 Run this file against an isolated Docker service by setting
 OMBRE_DOCKER_INTEGRATION_URL=http://ombre-brain:8000/mcp.
@@ -18,6 +18,7 @@ import pytest
 
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
+MCP_TOKEN = os.environ.get("OMBRE_DOCKER_MCP_TOKEN", "").strip()
 EXPECT_COMPRESSION_PROVIDER = os.environ.get(
     "OMBRE_DOCKER_EXPECT_COMPRESSION_PROVIDER", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -29,16 +30,36 @@ EXPECTED_TOOLS = {
     "breath_advanced",
     "hold",
     "grow",
+    "source_read",
     "trace",
     "anchor",
     "release",
     "pulse",
     "plan",
     "letter_write",
+    "letter_lock_update",
     "letter_read",
     "I",
     "dream",
 }
+EXPECTED_TOOL_ORDER = (
+    "breath",
+    "breath_search",
+    "breath_advanced",
+    "hold",
+    "grow",
+    "source_read",
+    "trace",
+    "dream",
+    "anchor",
+    "release",
+    "pulse",
+    "plan",
+    "letter_write",
+    "letter_lock_update",
+    "letter_read",
+    "I",
+)
 
 EXPECTED_TOOL_PROPERTIES = {
     "breath": set(),
@@ -58,6 +79,7 @@ EXPECTED_TOOL_PROPERTIES = {
     },
     "hold": {
         "content",
+        "title",
         "tags",
         "importance",
         "pinned",
@@ -71,6 +93,7 @@ EXPECTED_TOOL_PROPERTIES = {
         "test_data",
     },
     "grow": {"content", "items"},
+    "source_read": {"bucket_id", "expected_title", "scope", "cursor", "max_tokens"},
     "trace": {
         "bucket_id",
         "name",
@@ -102,20 +125,26 @@ EXPECTED_TOOL_PROPERTIES = {
     "release": {"bucket_id"},
     "pulse": {"include_archive"},
     "plan": {"content", "status", "related_bucket", "weight", "why_remembered"},
-    "letter_write": {"author", "content", "user_name", "title", "date", "ai_name"},
+    "letter_write": {
+        "author", "content", "user_name", "title", "date", "ai_name",
+        "lock_type", "unlock_date",
+    },
+    "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
-    "I": {"content", "aspect", "read", "limit"},
-    "dream": {"window_hours"},
+    "I": {"content", "aspect", "read", "limit", "promote"},
+    "dream": {"window_hours", "inspiration"},
 }
 
 EXPECTED_REQUIRED_PROPERTIES = {
     "breath_search": {"query"},
     "hold": {"content"},
+    "source_read": {"bucket_id", "expected_title"},
     "trace": {"bucket_id"},
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},
     "plan": {"content"},
     "letter_write": {"author", "content"},
+    "letter_lock_update": {"letter_id", "lock_type"},
 }
 
 
@@ -123,8 +152,8 @@ class MCPClient:
     def __init__(self, url: str):
         self.url = url
         self.client = httpx.Client(timeout=30.0, trust_env=False)
-        self.session_id = ""
         self.request_id = 0
+        self.protocol_version = ""
 
     def close(self):
         self.client.close()
@@ -142,28 +171,34 @@ class MCPClient:
 
     def _post(self, payload: dict, *, expect_body: bool = True) -> dict:
         headers = {
-            "Accept": "application/json, text/event-stream",
+            # Kelivo 兼容路径：只接受 JSON，不保存或回传会话头。
+            "Accept": "application/json",
             "Content-Type": "application/json",
         }
-        if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
+        if MCP_TOKEN:
+            headers["Authorization"] = f"Bearer {MCP_TOKEN}"
+        if self.protocol_version >= "2025-06-18":
+            headers["MCP-Protocol-Version"] = self.protocol_version
         response = self.client.post(self.url, headers=headers, json=payload)
-        self.session_id = response.headers.get("mcp-session-id", self.session_id)
+        assert "mcp-session-id" not in response.headers
         if not expect_body:
             assert response.status_code in (200, 202, 204)
             return {}
+        assert response.headers.get("content-type", "").startswith("application/json")
         return self._decode(response)
 
-    def initialize(self):
+    def initialize(self, protocol_version: str = "2025-03-26"):
         payload = self.request(
             "initialize",
             {
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": protocol_version,
                 "capabilities": {},
                 "clientInfo": {"name": "ombre-docker-audit", "version": "1.0"},
             },
         )
         assert payload["result"]["serverInfo"]["name"]
+        assert payload["result"]["protocolVersion"] == protocol_version
+        self.protocol_version = payload["result"]["protocolVersion"]
         self._post(
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
             expect_body=False,
@@ -249,8 +284,43 @@ def _hold(mcp_client: MCPClient, marker: str, **overrides) -> str:
     )
 
 
-def test_manifest_exposes_exactly_the_documented_14_tools(mcp_client):
+@pytest.mark.parametrize(
+    "protocol_version",
+    ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"),
+)
+def test_kelivo_handshake_versions_list_all_tools_without_session_header(
+    protocol_version,
+):
+    client = MCPClient(MCP_URL)
+    try:
+        client.initialize(protocol_version)
+        assert {tool["name"] for tool in client.list_tools()} == EXPECTED_TOOLS
+    finally:
+        client.close()
+
+
+def test_concurrent_clients_discover_the_same_stateless_dream_schema():
+    def discover(_index):
+        client = MCPClient(MCP_URL)
+        try:
+            client.initialize()
+            dream_tool = next(
+                tool for tool in client.list_tools() if tool["name"] == "dream"
+            )
+            return dream_tool["inputSchema"]
+        finally:
+            client.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        schemas = list(pool.map(discover, range(4)))
+
+    assert all(schema == schemas[0] for schema in schemas)
+    assert set(schemas[0]["properties"]) == {"window_hours", "inspiration"}
+
+
+def test_manifest_exposes_exactly_the_documented_15_tools(mcp_client):
     tools = mcp_client.list_tools()
+    assert [tool["name"] for tool in tools] == list(EXPECTED_TOOL_ORDER)
     tools_by_name = {tool["name"]: tool for tool in tools}
     assert set(tools_by_name) == EXPECTED_TOOLS
 
@@ -275,6 +345,7 @@ def test_manifest_exposes_exactly_the_documented_14_tools(mcp_client):
         ("breath_advanced", {"catalog": {"not": "a boolean"}}, "catalog"),
         ("hold", {}, "content"),
         ("grow", {"items": {"not": "a list"}}, "items"),
+        ("source_read", {}, "bucket_id"),
         ("trace", {}, "bucket_id"),
         ("anchor", {}, "bucket_id"),
         ("release", {}, "bucket_id"),
@@ -284,6 +355,7 @@ def test_manifest_exposes_exactly_the_documented_14_tools(mcp_client):
         ("letter_read", {"limit": {"not": "an integer"}}, "limit"),
         ("I", {"read": {"not": "a boolean"}}, "read"),
         ("dream", {"window_hours": {"not": "an integer"}}, "window_hours"),
+        ("dream", {"inspiration": {"not": "a boolean"}}, "inspiration"),
     ],
 )
 def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, field):
@@ -292,6 +364,39 @@ def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, 
     error_text = mcp_client.result_text(result)
     assert error_text, (tool, result)
     assert field.lower() in error_text.lower(), (tool, error_text)
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("breath", {}),
+        ("breath_search", {"query": "unknown-field-probe"}),
+        ("breath_advanced", {}),
+        ("hold", {"content": "unknown-field-probe", "test_data": True}),
+        ("grow", {"items": []}),
+        ("source_read", {"bucket_id": "unknown", "expected_title": "unknown"}),
+        ("trace", {"bucket_id": "missing-unknown-field-probe"}),
+        ("anchor", {"bucket_id": "missing-unknown-field-probe"}),
+        ("release", {"bucket_id": "missing-unknown-field-probe"}),
+        ("pulse", {}),
+        ("plan", {"content": "unknown-field-probe"}),
+        ("letter_write", {"author": "user", "content": "unknown-field-probe"}),
+        ("letter_read", {}),
+        ("I", {"read": True}),
+        ("dream", {}),
+    ],
+)
+def test_all_tools_reject_unknown_arguments_before_execution(
+    mcp_client,
+    tool,
+    arguments,
+):
+    arguments = {**arguments, "unknown_contract_probe": True}
+    result = mcp_client.call_result(tool, arguments)
+
+    assert result.get("isError") is True, (tool, result)
+    error_text = mcp_client.result_text(result)
+    assert "unknown_contract_probe" in error_text, (tool, error_text)
 
 
 def test_breath_zero_argument_surface_contract(mcp_client):
@@ -436,6 +541,41 @@ def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
     assert "batch:g_" in result
     recalled = mcp_client.call("breath_search", {"query": marker, "max_results": 5})
     assert marker in recalled
+
+
+def test_grow_items_source_layer_requires_exact_title_and_reads_one_event(mcp_client):
+    marker = _marker("source-layer")
+    source = f"开场 {marker}\n妻子说 wife 喔，不是 girlfriend 喔。\n直接 wife。\n尾声"
+    result = mcp_client.call(
+        "grow",
+        {
+            "content": source,
+            "items": [{
+                "title": "wife",
+                "content": f"{marker} 她注意到我直接用了 wife。",
+                "tags": ["老婆", "称呼"],
+                "importance": 8,
+                "domain": ["恋爱"],
+                "source_ranges": [[2, 3]],
+            }],
+        },
+    )
+    bucket_id = list(re.findall(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", result))[-1]
+
+    denied = mcp_client.call(
+        "source_read",
+        {"bucket_id": bucket_id, "expected_title": "直接确认关系"},
+    )
+    assert "标题不匹配" in denied
+
+    event = mcp_client.call(
+        "source_read",
+        {"bucket_id": bucket_id, "expected_title": "wife", "scope": "event"},
+    )
+    assert "wife 喔" in event
+    assert "直接 wife" in event
+    assert "开场" not in event
+    assert "尾声" not in event
 
 
 def test_trace_updates_existing_memory_metadata(mcp_client):
@@ -594,12 +734,44 @@ def test_letter_tools_preserve_and_filter_custom_author(mcp_client):
     assert author in result
 
 
-def test_I_writes_and_reads_self_description(mcp_client):
+def test_letter_time_lock_write_read_and_owner_unlock_in_real_container(mcp_client):
+    marker = _marker("locked-letter")
+    title = _marker("locked-title")
+    written = mcp_client.call(
+        "letter_write",
+        {
+            "author": "ai",
+            "content": marker,
+            "title": title,
+            "lock_type": "permanent",
+        },
+    )
+    receipt = json.loads(written)
+    assert receipt["stored"] is True
+    assert receipt["lock_type"] == "permanent"
+    assert marker not in written and title not in written
+
+    owner_read = mcp_client.call(
+        "letter_read", {"query": marker, "limit": 10}
+    )
+    assert marker in owner_read and title in owner_read
+
+    updated = json.loads(mcp_client.call(
+        "letter_lock_update",
+        {"letter_id": receipt["letter_id"], "lock_type": "none"},
+    ))
+    assert updated["updated"] is True
+    assert updated["lock_type"] == "none"
+
+
+def test_I_writes_and_reads_pending_self_description(mcp_client):
     marker = _marker("self")
     written = mcp_client.call("I", {"content": marker, "aspect": "values"})
     assert _bucket_id(written)
+    assert "这还只是一个念头，不是自我认知" in written
+
     read_back = mcp_client.call("I", {"read": True, "limit": 20})
-    assert "=== 我的自我认知" in read_back
+    assert "=== 正在沉淀的「我觉得」" in read_back
     assert marker in read_back
 
 
@@ -608,6 +780,33 @@ def test_dream_returns_recent_complete_memory(mcp_client):
     _hold(mcp_client, marker)
     result = mcp_client.call("dream", {"window_hours": 48})
     assert marker in result
+
+
+def test_dream_inspiration_is_explicit_and_does_not_add_a_tool(mcp_client):
+    marker = _marker("dream-inspiration")
+    bucket_id = _hold(mcp_client, marker, test_data=True)
+
+    try:
+        ordinary = mcp_client.call("dream", {"window_hours": 48})
+        inspired = mcp_client.call(
+            "dream",
+            {"window_hours": 48, "inspiration": True},
+        )
+
+        assert "Spark 灵感候选" not in ordinary
+        assert "Spark 灵感候选（显式请求、仅本次响应）" in inspired
+        assert "不是事实、当前立场、行动建议或工具许可" in inspired
+        assert len(mcp_client.list_tools()) == 16
+    finally:
+        cleanup = mcp_client.call(
+            "trace",
+            {
+                "bucket_id": bucket_id,
+                "hard_delete": True,
+                "delete_reason": "Spark Docker integration cleanup",
+            },
+        )
+        assert "已永久删除测试桶" in cleanup
 
 
 @pytest.mark.parametrize(("window_hours", "expected_window"), [(-100, 1), (1000, 336)])
@@ -707,10 +906,16 @@ def test_trace_rejects_oversized_replacement_without_losing_original(mcp_client)
 
 
 def test_http_transport_rejects_body_above_global_limit():
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if MCP_TOKEN:
+        headers["Authorization"] = f"Bearer {MCP_TOKEN}"
     response = httpx.post(
         MCP_URL,
         content=b"x" * (4 * 1024 * 1024 + 1),
-        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+        headers=headers,
         timeout=30,
     )
     assert response.status_code == 413

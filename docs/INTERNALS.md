@@ -107,7 +107,7 @@ Ombre-Brain/
 
 每个模块「干什么、边界在哪、依赖谁」：
 
-- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；以 `@mcp.tool()` / `@mcp_extra.tool()` 注册 **14 个薄封装**（每个 ≤ 10 行，只转发到 `tools/<名字>/`）；启动入口处把 `mcp_extra` 的 7 个工具回灌进 `mcp`，对外只暴露 **单连接器 `/mcp`**（14 工具全在这一条，详见 §3 抬头）；启动段调 `web.register_all(mcp)` 装配所有 HTTP 路由，并起 `mcp.streamable_http_app()` 一个 uvicorn 进程。**不写业务逻辑，也不再直接定义 HTTP 路由**——后者已全部迁到 `web/`。
+- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；15 个薄封装全部以 `@mcp.tool()` 直接注册到唯一公开实例；对外只暴露 **单连接器 `/mcp`**。
 - **tools/**（MCP 工具应用层）— 详见下面「1.x tools/ 包结构」。
 - **web/**（HTTP/Dashboard 路由层）— 详见下面「1.y web/ 包结构」。从旧 server.py 巨石里拆出的 16 个域模块，每个导出 `register(mcp)`；cookie/CSRF/会话鉴权等共享依赖在 `web/_shared.py`（类比 `tools/_runtime.py`）。
 - **bucket_manager.py** — 桶 CRUD + 多维加权搜索 + `touch()` 激活刷新 + `_time_ripple()` 时间涟漪 + 文件搬运（archive/permanent 之间）。
@@ -115,12 +115,12 @@ Ombre-Brain/
 - **dehydrator.py** — 通过 OpenAI 兼容 LLM API 做四件事：`analyze()` 自动打标、`merge()` 内容融合、`digest()` 日记拆分、`dehydrate()` 摘要压缩；外加 `judge_plan_resolution()` 给 plan 自动结案做 LLM 双判。带 SQLite 缓存避免重复 API 调用。
 - **embedding_engine.py** — 「门面 + 后端」两层向量化：后端只有**一个 OpenAI 兼容 API 实现**（默认 Gemini 云端）；门面负责 SQLite 存取、余弦搜索、孤儿对账、模型/维度一致性校验（不一致记 OB-W005，不阻止启动）。**本地离线向量化**不是另一个后端，而是把 `base_url` 指向 OB 托管的 Ollama 边车（bge-m3，由 `web/ollama_local.py` 拉起子进程）。旧文档的「bge-small-zh / sentence-transformers 懒加载」已废弃。
 - **bm25_index.py** — BM25 稀疏检索（jieba 中文分词），给 `bucket_manager.search()` 提供 TF-IDF 加权的关键词召回（Dim 7）。`rank_bm25` / `jieba` 是软依赖，未装则静默 no-op，不影响其余维度；索引由 BucketManager 持有，写后脏标记、search 时懒重建。
-- **import_memory.py** — Claude JSON / ChatGPT / DeepSeek / Markdown / 纯文本五种格式的历史对话导入，分块处理 + 断点续传 + 词频规律检测。
-- **backup_archive.py** — 本地备份格式：读取 Markdown、用 SQLite backup API 生成一致性快照、写 `backup_manifest.json`（逐文件 size + SHA-256）；导入前限制 ZIP 文件数/体积/压缩率并拒绝路径穿越、重复路径、损坏清单。
-- **migrate_engine.py** — 完整记忆包导入：把 `/api/export` 产生的 zip 增量 merge 进当前系统；识别 ID 冲突（skip/overwrite/keep_both），兼容新旧 embedding schema。模型不一致或快照缺向量时写入耐久 outbox，不把网络调用放在恢复事务里。旧版无清单包可兼容导入，但状态明确标记为未验证。
-- **vault_health.py** — Dashboard 与 `tools/check_buckets.py` 共用的只读健康检查：Markdown 解析、重复 ID、越界软链接、SQLite `quick_check`、孤儿向量、缺失且未进入 outbox 的向量。
+- **import_memory.py** — Claude JSON / ChatGPT / DeepSeek / Markdown / 纯文本五种格式的历史对话导入，超长单轮无损分块 + 断点续传 + 精确内容幂等去重 + 词频规律检测。导入只新建桶，不按语义合并旧桶；新桶持久化 `imported: true` 与 `source_tool: import`，创建/最后活跃时间均取导入时刻。
+- **ombrebrain/storage/backup_archive.py** — 本地备份格式：读取 Markdown 与 `_sources/src_<sha256>.source`、用 SQLite backup API 生成一致性快照、写 `backup_manifest.json`（逐文件 size + SHA-256）；导出/导入同时限制 ZIP 文件数、体积和压缩率，并校验证据路径、文件名哈希、UTF-8，拒绝路径穿越、符号链接、重复路径和损坏清单。
+- **migrate_engine.py** — 完整记忆包导入：把 `/api/export` 产生的 zip 增量 merge 进当前系统；证据在任何桶写入前完成校验并按不可变语义安装；识别 ID 冲突（skip/overwrite/keep_both），兼容新旧 embedding schema。模型不一致或快照缺向量时写入耐久 outbox，不把网络调用放在恢复事务里。旧版无清单包可兼容导入并标记未验证；旧包缺被引用证据时保留事件桶但明确警告。
+- **ombrebrain/storage/vault_health.py** — Dashboard 与 `tools/check_buckets.py` 共用的只读健康检查：Markdown 解析、重复 ID、越界软链接、SQLite `quick_check`、孤儿向量、缺失且未进入 outbox 的向量。
 - **migration_engine.py** — embedding 后端切换（local ↔ api）时后台全量重算向量：先写 `embeddings.db.migrating`、跑完原子 swap；断点续传 + 失败跳过 + 进度文件供前端轮询。
-- **github_sync.py** — 把 `buckets_dir` 下的 .md 经 GitHub Git Trees API 批量提交做云端备份（不传 embeddings.db）；支持手动 + 定时自动同步。路由在 `web/github.py`。
+- **github_sync.py** — 把 `buckets_dir` 下的 `.md` 与 `_sources/src_<sha256>.source` 经 GitHub Git Trees API 批量提交做云端备份（不传 embeddings.db）；备份前交叉检查全部 `source_refs`，并在清单标记引用闭包完整。恢复时先暂存并复核全部 blob、清单、证据文件名哈希、UTF-8、引用闭包与目标配置大小上限，再安装全部证据，最后才覆盖 Markdown，避免 tree 顺序制造悬空引用。v2.10.0 及更早的清单没有闭包标记，缺证据时兼容恢复事件桶但返回醒目警告。支持手动 + 定时自动同步，路由在 `web/github.py`。原文以明文进入仓库，运维必须使用可信私有仓库。
 - **reclassify_api.py** — 一次性脚本：把历史落在「未分类/」的桶重新 `analyze()` 打标并搬到正确 domain 目录，只改 frontmatter 与文件位置。
 - **errors.py** — OB 统一错误码（如 OB-W005 embedding 模型漂移、OB-Startup 系列），供各模块抛结构化异常。
 
@@ -146,8 +146,8 @@ src/tools/
 ├── dream/         # candidates/hints/output 三阶段 + __init__ 编排
 ├── trace/         # core（metadata/resolved/pinned/delete/content 替换/计划状态等全在这）
 ├── anchor/        # core：anchor_set / anchor_release / pulse
-├── plan/          # core：plan_create / letter_write / letter_read
-└── i/             # core：自我认知条目读写（dispatch=i_core），iter 2.x 新增
+├── plan/          # core：plan_create / letter_write / letter_lock_update / letter_read
+└── i/             # core：自我认知的候选写入 / 升级 / 读取 + 见证计数（dispatch=i_core）
 ```
 
 路线：`server.X(...)` → `tools.X.dispatch(...)`（`__init__.py`）→ 分支函数。所有分支只通过 `from .. import _runtime as rt` 读依赖，不能 `import server`。`server.py` 保留了 `_check_content_size / _check_pinned_quota / _max_bucket_bytes / _max_pinned / _merge_or_create / _check_duplicate_for / _check_plan_resolution` 这几个别名，让仍引用它们的调用点不需要改。
@@ -265,14 +265,12 @@ feel 桶自身：
 
 ---
 
-## 3. MCP 工具规格（共 14 个）
+## 3. MCP 工具规格（共 15 个）
 
-> **单连接器（iter 2.2）**：claude.ai 的 5 工具上限已解除，14 个工具合并回一个连接器 `/mcp`。
-> 历史上（iter 2.1）曾因该上限拆成主 `mcp`（`/mcp`，5 个）+ 副 `mcp_extra`（`/mcp-extra`，7 个）两个 FastMCP 实例。
-> 现在 `mcp_extra` 仅作工具分组容器保留（7 个 `@mcp_extra.tool()` 注册不动），启动入口处统一把它的工具
-> 回灌进 `mcp`，三种 transport（stdio / sse / streamable-http）都只对外暴露一条 `/mcp`。
-> - 高频 7 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream`
-> - 低频 7 个 —— `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_read` / `I`
+> **单连接器（iter 2.2）**：当前 16 个工具统一由连接器 `/mcp` 暴露。
+> 历史上（iter 2.1）曾拆成两个 FastMCP 实例。2.8.5 起删除历史容器，当前 16 个工具全部直接注册到唯一 `mcp`。
+> - 高频 8 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `source_read` / `trace` / `dream`
+> - 低频 8 个 —— `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`
 
 ### 3.1 `breath` / `breath_search` / `breath_advanced` — 检索/浮现
 
@@ -299,12 +297,12 @@ feel 桶自身：
 
 ### 3.2 `hold` — 存储单条记忆
 
-签名：`hold(content, tags="", importance=5, pinned=False, feel=False, source_bucket="", valence=-1, arousal=-1, why_remembered="", meaning="", media=None, test_data=False)`
+签名：`hold(content, title="", tags="", importance=5, pinned=False, feel=False, source_bucket="", valence=-1, arousal=-1, why_remembered="", meaning="", media=None, test_data=False)`
 
 两种路径：
 
 - **Feel 模式** (`feel=True`)：跳过 LLM 分析，自动注入 `__feel__` 标签，写入 `feel/沉淀物/`。`source_bucket` 提供时把源桶标记为 `digested=True` 并写 `model_valence`。返回 `🫧feel→{id}`。
-- **普通模式**：`analyze()` → 用户传入的 `valence`/`arousal` 优先于 LLM 结果（B-09 修复）→ `_merge_or_create(raw_merge=True)`（相似度 > `merge_threshold` 时以分隔线追加原文，否则新建）→ 原文落盘后投递 embedding outbox → 异步触发 `_check_plan_resolution()` 扫 active plans。返回 `合并→{name}` 或 `新建→{name}`。`analyze()` 或 embedding 不可用时只降级元数据/向量索引，正文仍原样落盘；**hold 永远不调 `dehydrate()`/`merge()` 压缩正文**。
+- **普通模式**：`analyze()` → 显式 `title` 与用户传入的 `valence`/`arousal` 优先于 LLM 结果 → `_merge_or_create(raw_merge=True)` → 原文落盘后投递 embedding outbox。打标或 embedding 不可用时只降级元数据/索引，正文仍原样落盘。
 - `meaning` 追加一条“为什么值得被想起”的第一人称含义；`media` 接受持久化前可读取路径或 `data_base64+filename` 项，失败时不写失效引用。
 - `test_data=True` 只在创建时写入不可后补的可擦除 provenance，并禁止与 pinned/feel 组合；这是 `trace(hard_delete=True)` 唯一允许物理删除的来源边界。
 
@@ -316,10 +314,21 @@ feel 桶自身：
 
 - 短内容（< 30 字符）走快速路径：`analyze()` + `_merge_or_create()`，跳过 `digest()` 节省一次 API。
 - 正常路径：`dehydrator.digest()` 拆为 2~6 条 → 每条独立走 `_merge_or_create()`，单条失败 try/except 隔离，标 `⚠️条目名`。
-- `items=[...]` 模式表示调用方已经拆好最终正文：忽略 `content`，逐条原文入库，只补元数据；最多 100 条且每条仍受单桶大小限制。
+- `items=[...]` 模式表示调用方已经拆好最终正文。对象条目可显式给出 `title/content/tags/importance/domain/valence/arousal/source_ranges`，显式字段优先于自动打标。若同时传 `content`，它会作为整批共享的不可变原文证据保存一次；每个桶以 1-based 闭区间 `source_ranges` 指向自己的片段。
 - 末尾异步触发 `_check_plan_resolution()`。
 
 返回示例：`3条|新2合1\n📝体检结果\n📌朋友聚餐\n📎近期焦虑情绪`。
+
+### 3.3.1 `source_read` — 单桶原文核对
+
+签名：`source_read(bucket_id, expected_title, scope="event", cursor=0, max_tokens=6000)`
+
+- 精确校验桶 ID 与显式标题；任一不符即拒绝，不做语义搜索、相关桶扩散或 LLM 处理。
+- `scope="event"` 只返回该桶声明的非空原文行范围；空范围失败关闭，行号超过实际内容时整次拒绝，不允许退化为全文。`scope="full_source"` 必须显式请求并返回共享原文全文，因此可能包含其他事件对应的相邻文字。
+- 原文存于 `<vault>/_sources/src_<sha256>.source`，按内容寻址并在读取时校验哈希。它不是 `.md`，不参与普通桶扫描、浮现或语义索引；v2.10.1 起会进入本地完整备份和 GitHub 备份。
+- 每次只处理一个桶，逐源读取并只保留当前分页窗口。最终响应头与正文共同受 `max_tokens` 约束；过长时返回非零 `next_cursor`，必须显式续读，不静默摘要。
+- 原文默认受 `limits.max_grow_input_bytes`（默认 2 MiB）约束，即使配置关闭该软限制也有 10 MiB 硬上限。不支持硬链接的 NAS/SMB/FUSE 会在发布时使用跨进程 sidecar 锁，且不会覆盖已经存在的不可变证据。
+- 精确桶 ID + 标题是读取意图门禁而非认证机制。远程可达的公网或局域网部署必须使用 OAuth/Token；stdio 与经安全门禁确认的本机回环模式继续遵循既有部署边界。正文始终包在“不可信存储数据”标记中。架构边界见 [ADR-0001](adr/ADR-0001-source-evidence-layer.md)。
 
 ### 3.4 `trace` — 修改/删除
 
@@ -339,7 +348,7 @@ feel 桶自身：
 - `hard_delete=True` 必须同时提供非空且不超过 500 字符的 `delete_reason`，不能与 `delete=True` 同时使用，且只接受创建时已标记为可擦除测试数据的桶；普通记忆与 plan 始终拒绝物理删除，拒绝时不会顺带归档。
 - **不暴露 `anchor` 字段**：anchor 切换必须走 `anchor()` / `release()` 工具（受 24 上限保护）。
 
-(返回时会按 `resolved`/`digested` 状态变化追加人话提示，如「→ 已沉底，只在关键词触发时重新浮现」。)
+(返回时会按 `resolved`/`digested` 状态变化追加人话提示。`digested=True` 会从无参 breath、被动联想和 dream 候选中硬过滤，不依赖 importance/衰减分数；显式 query 真命中以及 importance/catalog 审计入口仍可找回。)
 
 ### 3.5 `pulse` — 系统状态 + 桶列表
 
@@ -349,16 +358,30 @@ feel 桶自身：
 
 ### 3.6 `dream` — 做梦自省
 
-签名：`dream(window_hours=48)`（默认 48h 窗口；clamp 到 1~336h）
+签名：`dream(window_hours=48, inspiration=False)`（默认 48h 窗口；clamp 到 1~336h）
 
-- 默认取过去 48 小时内 `created` 或 `last_active` 任一在窗口内的桶（排除 permanent/feel/pinned/protected/plan/letter）
+- 默认取过去 48 小时内 `created` 或 `last_active` 任一在窗口内的桶（排除 permanent/feel/pinned/protected/plan/letter，以及 digested/dont_surface/anchor）
 - 排序：先按 `last_active` 倒序；候选超过 **40 个**时改按 `decay_engine.calculate_score()` 降序截断到前 40，避免一次涌进来太多撑爆上下文
 - 拼接桶摘要（完整正文，不截断）+ 自省引导 header
 - embedding 启用时附加：连接提示（最相似对，`>0.5`）+ feel 结晶提示（一条 feel 与 ≥2 条其它 feel 相似度 `>0.7` → 建议升级为 pinned）
+- 仅当调用方显式传 `inspiration=True` 时，在正文前部追加最多三个响应态 Spark 材料/问题候选：
+  - policy-first 只允许活动、未解决、普通 `dynamic` 桶；排除归档/删除/墓碑、`dont_surface`、
+    `digested`、anchor、pinned/protected/permanent 和私有类型
+  - 只读本地 `embeddings.db` 已有向量，不调用 embedding provider；选择语义近邻、跨域桥接及
+    条件反转核查材料，不包含随机通道
+  - 每条带两个来源 ID、完整正文 SHA-256、精确片段跨度、待核查共享结构、不对应处和假设；
+    向量相似度仅为选择证据，不合成灵感分、真值分或行动分
+  - 候选 `persistent=false`、`lifetime=response_only`、`retrievable=false`，不调用
+    `touch/touch_many`、不写桶、不记账、不进入 webhook payload；当前模型保留判断权
+  - embedding 关闭、向量不足或无合格非随机配对时失败关闭为空说明，不回退到普通 search、
+    随机材料或未过滤池
 - 末尾追加 `=== 你的 active plans ===` 全量列表
 - 末尾追加 `=== 你的 feel 历史（全量，旧 feel 按 token 预算折叠）===`：按 `surfacing.feel_max_tokens`（默认 6000）做预算，超出的老 feel 折叠为 60 字符单行摘要
 
-(实现细节：用户可手动传更大的 `window_hours`，但软上限 40 仍生效。plan 历史不参与 token 预算全量返回；feel 历史走 token 预算折叠。)
+(实现细节：用户可手动传更大的 `window_hours`，但软上限 40 仍生效。`inspiration=False`
+保持原 dream 输出；参数只接受布尔值且不会自动翻转。Spark 候选和其边界也计入
+`surfacing.dream_max_tokens`，预算不足时整段省略而不破坏边界。plan 历史不参与 token
+预算全量返回；feel 历史走 token 预算折叠。)
 
 ### 3.7 `plan` — 登记待办
 
@@ -370,13 +393,17 @@ feel 桶自身：
 
 **自动结案机制**：每次 `hold()` 或 `grow()` 末尾 `asyncio.create_task(_check_plan_resolution())` —— 向量预筛（>0.7）→ LLM 双判 (`resolved && confidence >= 0.7`) → 写 `status="resolved"` + `resolution_reason` + `resolved_by`。任何异常都吞掉，不影响主流程。无 embedding 时整个机制跳过（保守，宁漏报不误报）。
 
-### 3.8 `letter_write` / `letter_read` — 信件
+### 3.8 `letter_write` / `letter_read` / `letter_lock_update` — 信件
 
-`letter_write(author, content, user_name="", title="", date="", ai_name="")` —— `author` 必填；`user` 表示用户侧，`ai`（或与 `ai_name` 相同）表示 AI 侧，也接受任意自定义署名字符串。写入 `letters/history/`，**硬编码** `importance=10` / `valence=0.5` / `arousal=0.3`（设计：信件不开放给用户调这三项），原文永久保留。**不接受 `why_remembered`**——信件本身就是「为什么记得」的载体。
+`letter_write(author, content, user_name="", title="", date="", ai_name="", lock_type="none", unlock_date="")` —— 旧参数语义不变。`timed` 要求未来且带时区的 ISO 8601 时间；`permanent` 规范存为 `unlock_date: 9999-12-31`。MCP/stdio 的 `locked_by` 由服务端固定为 `ai`，Dashboard 固定为 `human`，普通参数不能覆盖。`author` 仍只是署名。
 
-`letter_read(query="", limit=10, author="", date_from="", date_to="")` —— 无 query 时按 `letter_date` 或 `created` 倒序；有 query 且 embedding 启用时用向量相似度排序。
+`letter_read(query="", limit=10, author="", date_from="", date_to="")` —— 无 query 时按时间倒序；锁拥有者可读全文，对方只收到无标题/正文的安全元数据。有 query 时先按 caller side 形成允许 ID 集，再在 embedding 向量反序列化与相似度排名之前过滤候选。
 
-信件特性：永不衰减（`calculate_score` 固定 50）、永不合并、不参与压缩；普通 `breath` 不浮现（被 `feel/plan/letter` 过滤）；`/breath-hook`（SessionStart）末尾追加双方各最新一封。
+`letter_lock_update(letter_id, lock_type, unlock_date="")` 只允许 `locked_by` 修改锁元数据，绝不编辑标题、正文、author 或 created。timed 到期采用访问时懒解锁，不使用 scheduler。
+
+Dashboard 的既有 `/api/letter/{letter_id}` PATCH 同时承载两类互斥请求：原稿字段编辑，或锁元数据管理；单次请求混用两类字段会被拒绝。历史/无锁 Letter 与锁拥有者自己的锁信仍可编辑原稿，来信方未解锁内容不可编辑。原稿变更沿用 BucketManager 的索引刷新，并且不会修改 `writer_name` 或锁元数据。
+
+信件特性：永不衰减、永不合并、不参与压缩。`/breath-hook` 以 hook Token 为 AI 视角、Dashboard session 为人类视角；公开未认证 hook 不返回任何仍锁定内容。时间锁是应用层访问边界，不是磁盘加密，主机或 vault 文件权限持有者仍可读取 Markdown 原文。
 
 ### 3.9 `anchor` — 标记坐标系桶（iter 2.0）
 
@@ -394,13 +421,21 @@ feel 桶自身：
 
 ### 3.11 `I` — 自我认知条目（iter 2.x）
 
-签名：`I(content="", aspect="", read=False, limit=20)`
+签名：`I(content="", aspect="", read=False, limit=20, promote="")`
 
-实现在 `tools/i/`（`dispatch = i_core`）。语义：「我写下关于我自己的认识」——不是「时间里发生的事」，而是模型对自身本质/规律/变化的观察。
+实现在 `tools/i/`（`dispatch = i_core`）。语义：「我写下关于我自己的认识」——不是「时间里发生的事」，而是模型对自身本质/规律/变化的观察。**`I` 是沉淀物不是日记**：想法先当普通记忆活着，经 dream 反复碰撞后才可能升级进 `I`（哲学边界见 `rule.md` 第 13.1 条）。
 
-- `content` 空 或 `read=True` → **读取模式**，返回已积累的全部自我认知（按 `limit` 截断，默认 20 条）。
-- `content` 非空 → **写入模式**，记一条自我认知；`aspect` 可选维度：`nature`(本质) / `values`(看重的) / `patterns`(规律) / `limits`(局限) / `becoming`(在变成什么) / `uncertainty`(不确定的) / `stance`(立场)。
-- I 条目写入时带 `dont_surface=True`：**不参与普通 `breath` / `dream`**；只在 `SessionStart` 时自动附带最近 3 条。
+- `content` 非空 → **写候选**。创建一条普通 `dynamic` 桶，tag `__i_candidate__`（刻意不是 `__i__`）、`i_stage="candidate"`、`i_dream_dates=[]`。候选照常浮现、衰减、进 dream 窗口——站不住的自然沉下去。`aspect` 可选维度：`nature`(本质) / `values`(看重的) / `patterns`(规律) / `limits`(局限) / `becoming`(在变成什么) / `uncertainty`(不确定的) / `stance`(立场)。
+- `content` 空 或 `read=True` → **读取模式**，返回正式条目（按 `limit` 截断，默认 20 条）＋ 待沉淀候选清单；没有 `i_from_candidate` 的历史条目标注为「早期直接写入，未经沉淀」。
+- `promote="桶ID"` → **升级**。要求该候选的 `i_dream_dates` 已有 ≥ `I_PROMOTE_THRESHOLD`（3）个不同日期，否则拒绝并报告还差几次。通过后创建 `type="i"` 桶（`dont_surface=True`、`i_from_candidate`、继承 `i_dream_dates`），候选桶保留原文并改标 `i_stage="promoted"` / `i_promoted_to` / `resolved=True`。同时传 `content` 可用提炼后的措辞落成正式条目。
+- 正式 I 条目带 `dont_surface=True`：**不参与普通 `breath` / `dream`**；只在 `SessionStart` 时自动附带最近 3 条。
+
+dream 侧配合（`tools/dream/hints.py` + `output.py`）：
+
+- `collect_self_candidates(all_buckets)` 收集全部待沉淀候选，用**已落盘向量**（不发新请求）为每条取相似度 ≥ 0.35 的前 3 条对照材料；对照池 = 全部正式 I 条目 + 全部其它候选 + 最近 200 条普通桶（排除 `letter`）。向量不可用时只列候选并明说。
+- 输出段落排在 recent 段之后、active plan 段之前，受 `surfacing.dream_max_tokens` 预算约束。
+- 见证计数由 `dream/__init__.py` 在渲染成功后调 `tools.i.record_dream_pass()` 写入，按天去重；因预算未展开的候选不计次——没被看见的不算经历过。
+- 碰撞只摆材料，**不做矛盾/重复判定**（认知层边界，`rule.md` 第 5 条）。
 
 ---
 
@@ -452,10 +487,10 @@ feel 桶自身：
 | `/api/import/status` | GET | 🔒 | 导入进度 |
 | `/api/import/pause` | POST | 🔒 | 暂停/继续 |
 | `/api/import/patterns` | GET | 🔒 | 词频规律检测 |
-| `/api/import/results` | GET | 🔒 | 已导入桶列表（含正文 300 字预览） |
+| `/api/import/results` | GET | 🔒 | 仅返回已导入桶，支持 `limit`/`offset` 分页（含正文 300 字预览） |
 | `/api/import/review` | POST | 🔒 | 批量审阅（important / pin / noise / delete） |
 | `/api/bucket/{id}/edit` | PATCH/POST | 🔒 | iter 1.6 §6：Dashboard 编辑桶元数据（name/tags/domain/importance/resolved/pinned/digested/content）；走 §5 大小+pinned 配额 |
-| `/api/export` | GET | 🔒 | 返回可验证 zip：buckets/*.md + SQLite 一致性快照 + export_meta.json + backup_manifest.json；**不包含 config / 密钥**；任何源文件读取失败则整个导出失败，不产生“看似成功”的残缺包 |
+| `/api/export` | GET | 🔒 | 返回可验证 zip：`buckets/*.md` + `sources/src_<sha256>.source` + SQLite 一致性快照 + export_meta.json + backup_manifest.json；**不包含 config / 密钥**；任何记忆或证据源文件读取失败则整个导出失败，不产生“看似成功”的残缺包 |
 | `/api/migrate/upload` | POST | 🔒 | 上传 zip 包，先做 ZIP 安全边界与清单 SHA-256 校验，再解析内容、识别 ID 冲突、检查 embedding 模型/维度；返回冲突和 `integrity_verified`，不实际写入 |
 | `/api/migrate/status` | GET | 🔒 | 查询当前迁移任务状态（phase / 冲突列表 / 导入进度 / 重新向量化进度） |
 | `/api/migrate/apply` | POST | 🔒 | 执行导入；请求必须回传本次 upload 返回的 `job_id`，并携带冲突决策 `{bucket_id: "skip"|"overwrite"|"keep_both"}`。过期/缺失 job ID 返回 409；异步执行，轮询 status 看进度 |
@@ -475,11 +510,11 @@ feel 桶自身：
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 单连接器（iter 2.2）：全部 14 个工具 —— breath / breath_search / breath_advanced / hold / grow / dream / trace / anchor / release / pulse / plan / letter_write / letter_read / **I** |
+| `/mcp/*` | — | 公开 | FastMCP 单连接器：全部 16 个工具 —— breath / breath_search / breath_advanced / hold / grow / source_read / dream / trace / anchor / release / pulse / plan / letter_write / letter_lock_update / letter_read / **I** |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
 
-(实现注意：所有 `/api/*` 路由在函数体首行调用 `web/_shared.py` 的会话鉴权 helper；这些路由已全部从 server.py 迁到 `web/<域>.py`，新增端点在对应模块里沿用此模式。`/mcp` 走另一套保护：`config.yaml: mcp_require_auth`（默认 true）开启时由纯 ASGI 中间件（`server_app.py: MCPAuthMiddleware`）校验请求；设为 false 则完全开放直连（无任何校验）。`mcp_require_auth: true` 时还有一个正交的 `mcp_auth_mode` 三选一：默认 `"oauth"` 走 OAuth 2.1 + PKCE Bearer token（`web/oauth.py: _is_valid_mcp_token`）；`"token"` 改走静态密钥（`web/oauth.py: _is_valid_static_mcp_token`，比对 `mcp_token` / `OMBRE_MCP_TOKEN`，接受 `Authorization: Bearer` 或 `Ombre-MCP-Token` 请求头，不支持 URL 参数）。两种模式互斥——`token` 模式下 `web/oauth.py: _oauth_required_from_config()` 返回 false，OAuth 的 discovery/register/authorize/token 路由全部 404。`mcp_auth_mode`/`auth_required` 均在进程启动时读入中间件闭包，Dashboard 热改 `sh.config` 后需重启才真正切换（`/api/config` 用 `restart_required` 字段回显）；静态 Token 本身的校验函数每次请求实时读取，重新生成 Token 无需重启即可生效。MCP 协议自身无 cookie 认证层，靠传输层（cloudflared、ngrok）+ Bearer/静态 Token 做边界。另：`_MCPAcceptShim` 中间件会给 `/mcp*` 探测请求补齐 `Accept: application/json, text/event-stream`，修复某些客户端首个探测 POST 的 406。)
+(实现注意：所有 `/api/*` 路由在函数体首行调用 `web/_shared.py` 的会话鉴权 helper；这些路由已全部从 server.py 迁到 `web/<域>.py`，新增端点在对应模块里沿用此模式。`/mcp` 走另一套保护：`config.yaml: mcp_require_auth`（默认 true）开启时由纯 ASGI 中间件（`server_app.py: MCPAuthMiddleware`）校验请求；设为 false 后重启即开放直连。`assess_mcp_network_safety()` 仍向启动日志、Dashboard 与向导报告非回环匿名访问风险，但不得覆盖运行配置；`OMBRE_ALLOW_INSECURE_MCP=true` 只用于 Dashboard/向导保存危险组合和内置 Tunnel 风险确认。`mcp_require_auth: true` 时还有一个正交的 `mcp_auth_mode`：默认 `"oauth"` 走 OAuth 2.1 + PKCE Bearer token（`web/oauth.py: _is_valid_mcp_token`）；`"token"` 只走静态密钥；`"hybrid"` 保留 OAuth discovery/DCR/授权，同时让 Bearer 也接受静态密钥（`web/oauth.py: _is_valid_static_mcp_token`，比对 `mcp_token` / `OMBRE_MCP_TOKEN`，并在 token/hybrid 接受 `Ombre-MCP-Token` 请求头，不支持 URL 参数）。纯 `token` 模式下 `_oauth_required_from_config()` 返回 false，OAuth 路由全部 404；hybrid 的 401 仍发布 OAuth resource metadata。`mcp_auth_mode`/`auth_required` 均在进程启动时读入中间件闭包，Dashboard 热改后需重启才真正切换；静态 Token 每次请求实时读取，重新生成无需重启。浏览器 CORS 预检不携带业务 Token，因此 `MCPAuthMiddleware` 必须显式放行 `OPTIONS`；同时 Starlette 按注册顺序反向包裹中间件，`CORSMiddleware` 必须注册在 MCP 鉴权之后、实际位于其外层，确保预检和 401 响应均包含 CORS 头。2.8.5 起 Streamable HTTP 使用无状态 JSON 响应，不要求客户端回传 `Mcp-Session-Id`；`MCPJSONAcceptShim` 只为缺失或通配 `Accept` 的客户端补充 JSON，显式媒体类型保持原意。)
 
 ### 4.2 Dashboard 认证
 
@@ -547,10 +582,13 @@ FTS 搜索只用于本地验证和未来 projection 迁移准备，当前只索�
 
 当前接入点：
 - 无参 `breath()` 的 core / unresolved / passive / occasional resolved 池。
+- `breath_search()` / `breath_advanced(query=...)` 的非命中随机联想池（query 真命中仍使用 search 策略）。
+- `dream()` 的 recent 候选与 core context。
+- `/breath-hook`（SessionStart）的 core / unresolved 池。
 - Dashboard `/api/breath` 轻量浮现接口。
 
 当前规则：
-- `spontaneous` / `dream` 模式拒绝 `dont_surface=True`、`anchor=True`、`feel/plan/letter/self/i`、`archived`、`deleted_at`、`tombstone`。
+- `spontaneous` / `dream` 模式拒绝 `dont_surface=True`、`digested=True`、`anchor=True`、`feel/plan/letter/self/i`、`archived`、`deleted_at`、`tombstone`；`search` 与显式 importance 审计仍允许读取 digested。
 - `importance` 模式拒绝 `dont_surface=True` 与专用类型，但保留 anchor 可达性。
 - `search` 模式只拒绝终态（archived / deleted / tombstone），显式关键词搜索仍可找回 `dont_surface=True` 的记忆。这是主动遗忘契约：不主动冒出来，但没有被抹去。
 
@@ -768,7 +806,7 @@ Phase 38 后，Dashboard `/api/system/diagnostics` 会追加 `migration_preserva
 
 `ombrebrain.protocol.PublicToolDesignContract` 对应 vNext §25。它不改变当前 live FastMCP 注册，也不会移除现有兼容入口；它把“哪些名字可以公开给模型作为 MCP 工具”变成可测试契约，并在 Phase 32 后接入 Dashboard diagnostics 的只读源码注册审计。
 
-公开 normal tool 只能使用器官语言：`hold`、`grow`、`trace`、`breath`、`pulse`、`dream`、`anchor`、`I`、`letter`、`plan`。当前已存在的兼容名字 `release`、`letter_write`、`letter_read` 暂时允许，但报告里会给出替代归宿 `anchor` / `letter`，方便后续迁移文档和客户端慢慢收敛。
+公开 normal tool 只能使用器官语言：`hold`、`grow`、`trace`、`breath`、`pulse`、`dream`、`anchor`、`I`、`letter`、`plan`。当前已存在的兼容名字 `release`、`letter_write`、`letter_lock_update`、`letter_read` 暂时允许，但报告里会给出替代归宿 `anchor` / `letter`，方便后续迁移文档和客户端慢慢收敛。
 
 工程名不能作为 public MCP tool 暴露：`remember`、`touch`、`resolve`、`suppress`、`surface`、`hippocampal_recall`、`offline_consolidate`、`update_memory_row` 等只允许作为 internal label。restricted/admin 工具（如 `verify_ledger`、`replay_ledger`、`rebuild_projection`、`admin_erasure_request`）必须显式标为 restricted 且要求 admin。
 
@@ -940,7 +978,7 @@ Phase 43 后，`LegacyRuntime` 会直接暴露 `debug_command_boundary_health(li
 
 `ombrebrain.maintenance.vnext_coverage.VNextCoverageMatrix` 是一个只读、本地的 Phase 映射表。它把目前的 vNext 本地实施阶段映射到：
 
-- 对应的 `docs/superpowers/plans/*.md` 计划文件；
+- 阶段标识与简短标题（内部计划文件不进入版本控制）；
 - 覆盖该阶段的测试文件；
 - 如果已经接入 preflight，则列出对应的 check name；
 - `local_completion_percent` 与 `preflight_coverage_percent`。
@@ -1155,7 +1193,7 @@ Phase 8B 仍没有改变 live `breath()` / search 输出。它先把“记忆只
 - `trace` → `reconsolidation`，带 `append-only-reconstruction` / `original-trace-preserved` 边界。
 - `anchor` / `release` → `landmark_network`。
 - `I` → `self_description_memory`。
-- `letter_write` / `letter_read` → `artifact_trace`。
+- `letter_write` / `letter_lock_update` / `letter_read` → `artifact_trace`。
 - `plan` → `unresolved_tension_memory`，并显式 `may_drive_action=False`。
 
 这一步和 `LegacyCommandBridge` 分工不同：command bridge 负责旧 runtime 的 command/projection plan；Neural Tool Router 负责表达“外部器官语言不变，内部路径严格分化”。Phase 8C 还没有替换 live tool execution。
@@ -1346,7 +1384,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 `pinned` 计数按逻辑 bucket ID 去重，并通过 `parse_bool` 解释历史 YAML 布尔值；archived/deleted/tombstone 是终态，不占 pinned 名额，也不能通过常规 `BucketManager.update()`、Dashboard 或导入复核重新激活。
 
-**importance≥9 配额口径**：只统计能被 `breath_advanced(importance_min=9)` 审计的普通记忆，再排除走独立配额的 `pinned/protected`。因此 `dont_surface`、`feel/plan/letter`、archived/deleted/tombstone 不占该池；显式且未 pinned 的 `permanent` 仍属于普通高重要度候选。历史恢复或手工文件可能产生同 ID 的物理副本，配额始终按逻辑 bucket ID 只计一次。取消钉选、恢复浮现、特殊类型转回 dynamic/permanent、历史对话在线导入，以及新建/合并导致 importance 升到 9+ 时，资格检查和写盘必须在同一个 `high_importance` quota turn 内完成。备份迁移、`write_memory.py` 和手工 Markdown 属于受信任的保真/维护入口，允许原样恢复或直接修订数据，不适用在线写入配额。
+**importance≥9 配额口径**：只统计能被 `breath_advanced(importance_min=9)` 审计的普通记忆，再排除走独立配额的 `pinned/protected`。因此 `dont_surface`、`feel/plan/letter`、archived/deleted/tombstone 不占该池；显式且未 pinned 的 `permanent` 仍属于普通高重要度候选。历史恢复或手工文件可能产生同 ID 的物理副本，配额始终按逻辑 bucket ID 只计一次。取消钉选、恢复浮现、特殊类型转回 dynamic/permanent、历史对话在线导入，以及其他在线新建/合并导致 importance 升到 9+ 时，资格检查和写盘必须在同一个 `high_importance` quota turn 内完成；历史对话导入本身只做精确内容去重，不再语义合并旧桶。备份迁移、`write_memory.py` 和手工 Markdown 属于受信任的保真/维护入口，允许原样恢复或直接修订数据，不适用在线写入配额。
 
 (实现注意：`pinned` 和 `protected` 在代码里几乎等价处理，但 `protected` 是历史遗留字段，新桶不应再写；UI 只暴露 pinned。)
 
@@ -1358,7 +1396,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `transport` | `stdio` | `stdio` / `sse` / `streamable-http` |
+| `transport` | `stdio` | `stdio` / `streamable-http`（legacy SSE 已于 2026-08-09 下线） |
 | `log_level` | `INFO` | 日志级别 |
 | `buckets_dir` | `./buckets` | 记忆桶目录 |
 | `merge_threshold` | `75` | 合并相似度阈值 (0~100) |
@@ -1412,7 +1450,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `OMBRE_EMBED_MODEL` | `gemini-embedding-001` | 覆盖 `embedding.model` |
 | `OMBRE_EMBED_BACKEND` | （已废弃） | 旧的本地后端选择（bge-small-zh/bge-m3 sentence-transformers）已移除；现在统一走 `api` 后端，本地离线靠 `OMBRE_EMBED_BASE_URL` 指向 Ollama 边车 + 填本地模型名 |
 | `OMBRE_TRANSPORT` | `stdio` | 覆盖 `transport` |
-| `OMBRE_PORT` | `8000` | HTTP/SSE 监听端口 |
+| `OMBRE_PORT` | `8000` | HTTP 监听端口 |
 | `OMBRE_BUCKETS_DIR` | `./buckets` | 覆盖 `buckets_dir`（Docker volume 必设） |
 | `OMBRE_VAULT_DIR` | — | `OMBRE_BUCKETS_DIR` 未设时的 fallback（二者同义，`OMBRE_BUCKETS_DIR` 优先） |
 | `OMBRE_HOOK_URL` | — | Webhook 推送地址；空则不推送 |
@@ -1503,7 +1541,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `hold` 合并搜索失败 | search 异常 | 直接走新建路径 |
 | `hold` 合并融合失败 | merge 异常 | 直接走新建路径 |
 | `hold` embedding | API 异常 / 未配置 | 桶先创建成功，任务留在耐久 outbox；后台恢复后自动补齐 |
-| `grow` digest 失败 | API 异常 | **直接 RuntimeError**，不创建任何桶，返回「API key 未配置或调用失败，日记拆分无法完成，桶未创建。请检查 OMBRE_COMPRESS_API_KEY。」 |
+| `grow` digest 失败 | API 异常 | 抛出仅含程序内置安全文案的 `PublicToolError`，不创建任何桶，返回「API key 未配置或调用失败，日记拆分无法完成，桶未创建。请检查 OMBRE_COMPRESS_API_KEY。」；供应商异常正文不进入响应、持久错误或日志。 |
 | `grow` 单条失败 | 单 item 异常 | 标 `⚠️条目名`，其它继续 |
 | `grow` 短内容 (<30 字) | — | 跳过 digest 走 hold 单条 |
 | `trace` 桶不存在 | get None | 返回「未找到记忆桶: {id}」 |
@@ -1588,7 +1626,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | Dashboard 401 | `web/_shared.py` + `web/auth.py` | 会话鉴权 helper；检查 cookie `ombre_session`；`OMBRE_DASHBOARD_PASSWORD` 是否正确 |
 | 改密码报「环境变量密码」错误 | `web/auth.py` | `auth_change_password` 检测 `OMBRE_DASHBOARD_PASSWORD` 设置时禁用 |
-| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，工具已回灌进 `mcp`）；URL 末尾必须 `/mcp` |
+| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，16 个工具直接注册在 `mcp`）；URL 末尾必须 `/mcp` |
 | docker compose 重启后桶丢失 | — | 使用 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到 `/app/buckets`；该目录同时持久化桶、配置和 Tunnel token |
 | Dashboard 改 host vault 不生效 | `web/import_api.py` | 容器无法修改启动前确定的宿主机挂载；Docker 内界面只读，必须编辑宿主机 compose 同目录 `.env` 后 `--force-recreate` |
 | keepalive 失败 | `server.py` | `_keepalive_loop`；检查 `OMBRE_PORT` 实际监听端口 |
@@ -1656,7 +1694,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 ## 14. 安全部署模式与首次向导
 
-- `src/deployment_profile.py` 是纯领域层：定义三种模式、生成最小配置补丁、校验公网安全不变量，并生成“已保存 / 实际生效 / 环境来源”报告。
+- `src/ombrebrain/security/deployment_profile.py` 是纯领域层：定义三种模式、生成最小配置补丁、校验公网安全不变量，并生成“已保存 / 实际生效 / 环境来源”报告。
 - `src/web/onboarding.py` 独立注册 `/onboarding`、`/api/onboarding/profile`、`/api/onboarding/preflight`、`/api/onboarding/apply`。API 复用 Dashboard 会话；保存采用同目录临时文件、`fsync` 和原子替换。
 - `frontend/onboarding.html` 只消费后端模式目录，不复制安全规则；Dashboard 的 MCP 设置和首次运行提示都链接到该页面。
 - `src/web/system.py` 将同一份有效配置报告纳入系统体检。环境变量存在会被记录为来源，只有它与已保存值不同才属于覆盖告警。

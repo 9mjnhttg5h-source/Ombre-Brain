@@ -12,7 +12,8 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
   必须同时提供非空 delete_reason，普通记忆和 plan 均拒绝且保持原位
 - 收集传入字段构造 updates dict（含 status/weight/dont_surface/
   why_remembered/pinned/digested/resolved/content/tags/domain 等）
-- pinned=1 时强制 importance=10 并做配额检查；pinned=0 仅取消标记
+- pinned=1 时强制 importance=10 并做配额检查；pinned=0 必须在
+  同一次调用显式传入 importance=1..10，原子恢复动态评分
 - content 改写时同步重建 embedding，并对 plan 桶追加 change_log
 - resolved/digested 切换会附中文语义提示
 
@@ -45,6 +46,7 @@ from .._common import (
     enforce_high_importance_quota,
     occupies_high_importance_quota_slot,
 )
+from ..plan.core import is_letter_bucket, letter_lock_revision, letter_lock_state
 
 
 async def trace_core(
@@ -187,6 +189,15 @@ async def trace_core(
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
 
+    if restore or delete or hard_delete:
+        guarded_bucket = await rt.bucket_mgr.get(bucket_id)
+        if (
+            guarded_bucket
+            and is_letter_bucket(guarded_bucket)
+            and letter_lock_state(guarded_bucket, "ai")["locked"]
+        ):
+            return "这封信尚未向你开放，不能通过 trace 修改其生命周期。"
+
     restore_conflicts = any((
         delete,
         hard_delete,
@@ -287,8 +298,27 @@ async def trace_core(
 
     meta = bucket.get("metadata", {})
     current_pinned = parse_bool(meta.get("pinned"), default=False)
+    logical_letter = is_letter_bucket(bucket)
+    lock_precondition = (
+        {"expected_lock_state": letter_lock_revision(bucket)}
+        if logical_letter else {}
+    )
+    if logical_letter and letter_lock_state(bucket, "ai")["locked"]:
+        return "这封信尚未向你开放；请使用 Letter 专用入口管理锁状态。"
+    if (
+        logical_letter
+        and pinned in (0, 1)
+        and bool(pinned) != current_pinned
+    ):
+        return "Letter 不能通过 trace 改变 pinned 状态；请使用 Letter 专用入口。"
     protected = parse_bool(meta.get("protected"), default=False)
     unpinning_now = pinned == 0 and current_pinned
+    if unpinning_now and not (1 <= importance <= 10):
+        return (
+            f"解除记忆桶 {bucket_id} 的 pinned 状态时，必须在同一次 trace "
+            "中显式传入 importance=1..10。本次未修改。"
+        )
+
     if (
         1 <= importance <= 10
         and (current_pinned or protected)
@@ -296,7 +326,8 @@ async def trace_core(
     ):
         return (
             f"记忆桶 {bucket_id} 是 pinned/protected 核心桶，importance 被锁定为 10，"
-            "本次未修改。请先 trace(bucket_id, pinned=0)，再单独 trace(bucket_id, importance=...)。"
+            "本次未修改。解除 pinned 时请在同一次调用传入 "
+            "trace(bucket_id, pinned=0, importance=1..10)。"
         )
 
     # 配额判定 + 落盘必须在同一把锁里：check_pinned_quota/enforce_high_importance_quota
@@ -483,6 +514,8 @@ async def trace_core(
                 old_str=old_str,
                 new_str=new_str,
                 append_plan_history=append_plan_history_in_patch,
+                event_actor="llm",
+                **lock_precondition,
                 **updates,
             )
             if not patch_result.get("ok"):
@@ -507,13 +540,18 @@ async def trace_core(
                     return "old_str 与 new_str 替换后正文没有变化；本次未修改。"
                 return f"修改失败: {bucket_id}"
         else:
-            success = await rt.bucket_mgr.update(bucket_id, **updates)
+            success = await rt.bucket_mgr.update(
+                bucket_id,
+                event_actor="llm",
+                **lock_precondition,
+                **updates,
+            )
             if not success:
                 return f"修改失败: {bucket_id}"
 
-    # 注意：完整正文更新和局部替换都会在 BucketManager 内汇入
-    # _update_locked(content=...)，并投递 embedding outbox。这里不需要、也不应该
-    # 重复调用 generate_and_store，否则同一条内容会多打一次向量 API。
+    # 注意：完整正文更新和局部替换都会在 BucketManager 内先提交 Markdown，
+    # 释放桶租约后再投递 embedding outbox。这里不需要、也不应该重复调用
+    # generate_and_store，否则同一条内容会多打一次向量 API。
 
     # --- plan 桶人工/AI 显式 resolve → 联动 related_bucket / resolved_by ---
     # rule.md §1：plan 是承诺，承诺被显式放下，承载它的事件桶也不该再浮上来。
@@ -552,9 +590,9 @@ async def trace_core(
         changed += f" → {resolved_hint(bool(updates['resolved']))}"
     if "digested" in updates:
         if updates["digested"]:
-            changed += " → 已隐藏，保留但不再浮现"
+            changed += " → 已从默认/被动浮现与 dream 隐藏，显式检索/审计仍可找回"
         else:
-            changed += " → 已取消隐藏，重新参与浮现"
+            changed += " → 已取消消化隐藏；若无其他隐藏策略，将重新参与默认浮现与 dream"
     if cascaded:
         changed += f" → 同步把 {len(cascaded)} 个关联事件桶也标为已放下（{', '.join(cascaded)}）"
     return f"已修改记忆桶 {bucket_id}: {changed}"

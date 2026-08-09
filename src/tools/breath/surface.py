@@ -8,7 +8,8 @@ tools/breath/surface.py — 无 query 浮现模式
 
 关键行为：
 - 排除 anchor 桶（anchor 是坐标系，不主动出现）
-- pinned/protected 桶始终作为「核心准则」置顶（letter 桶即使 importance=10 也不置顶）
+- 排除 digested 桶（已消化记忆只允许显式检索/审计找回）
+- 通过主动浮现策略的 pinned/protected 桶作为「核心准则」置顶（digested、dont_surface、anchor 优先隐藏；letter 桶也不置顶）
 - 未解决桶按 calculate_score 排序；冷启动桶（从未访问且 importance>=8）插队前 2
 - 配置开关 surfacing.sampling.enabled 启用后做加权无放回采样，否则
   保留 top1 + top20 内随机洗牌
@@ -29,6 +30,7 @@ from datetime import datetime, timedelta
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
+from ..plan.core import is_letter_bucket
 from utils import parse_bool, parse_iso_datetime
 from ._verbatim import render_stored_bucket
 
@@ -82,8 +84,8 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         )
 
     # --- pinned/protected 桶置顶（排除 letter 桶：letter 的 importance=10 不代表核心准则）---
-    # 注意：pinned 提取在 anchor 过滤 *之前*，保证 anchor+pinned 桶也能出现在核心准则段。
-    # pinned 优先级高于 anchor（她/他钉选的原则永远可见）。
+    # pinned 与 anchor 在正常写入路径互斥：钉选会清除 anchor，设 anchor 会拒绝 pinned 桶。
+    # 末尾的 anchor 排除是脏数据防御；若异常并存，仍按 anchor 语义不主动浮现。
     pinned_buckets = [
         b for b in all_buckets
         if (
@@ -92,7 +94,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             or b["metadata"].get("type") == "permanent"
         )
         and _can_surface(b)
-        and b["metadata"].get("type") != "letter"
+        and not is_letter_bucket(b)
         and not b["metadata"].get("anchor", False)  # 防御：anchor 是坐标系，永不主动浮现，即使 pinned
     ]
     core_filter_notice = ""
@@ -126,6 +128,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         b for b in all_buckets_non_anchor
         if _can_surface(b)
         and not b["metadata"].get("resolved", False)
+        and not is_letter_bucket(b)
         and b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "self", "i")
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
@@ -328,6 +331,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
                 if _can_surface(b)
                 and b["metadata"].get("resolved", False)
                 and b["id"] not in shown_ids
+                and not is_letter_bucket(b)
                 and b["metadata"].get("type") not in ("feel", "plan", "letter")
                 and not b["metadata"].get("pinned")
             ]

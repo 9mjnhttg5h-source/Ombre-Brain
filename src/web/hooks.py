@@ -15,7 +15,6 @@ web/hooks.py — breath 浮现挂载点（HTTP hook）
 """
 
 import asyncio
-import hmac
 import hashlib
 import json
 import os
@@ -25,10 +24,17 @@ import time
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 
+from ombrebrain.policy.surfacing import SurfacePolicyVM
+from tools.plan.core import (
+    is_letter_bucket,
+    letter_lock_state,
+    normalize_expired_lock,
+)
 
 from . import _shared as sh
 
 logger = sh.logger
+_SURFACE_POLICY = SurfacePolicyVM.default()
 
 _HOOK_CONCURRENCY = 2
 _HOOK_RATE_WINDOW_SECONDS = 60.0
@@ -88,7 +94,7 @@ def _is_hook_request_authorized(request) -> bool:
             _header_value(request, "x-ombre-hook-token"),
             auth[7:] if auth.startswith("Bearer ") else "",
         ]
-        if any(v and hmac.compare_digest(v, token) for v in supplied):
+        if any(v and sh._constant_time_text_equal(v, token) for v in supplied):
             return True
 
     try:
@@ -106,7 +112,10 @@ def _valid_hook_token(request) -> bool:
         _header_value(request, "x-ombre-hook-token"),
         auth[7:] if auth.startswith("Bearer ") else "",
     )
-    return any(value and hmac.compare_digest(value, token) for value in supplied)
+    return any(
+        value and sh._constant_time_text_equal(value, token)
+        for value in supplied
+    )
 
 
 def _hook_source_key(request) -> str:
@@ -232,6 +241,17 @@ def register(mcp) -> None:
         if not _is_hook_request_authorized(request):
             return PlainTextResponse("", status_code=401)
 
+        # Token-authenticated SessionStart is the AI consumer.  A valid
+        # Dashboard session is the human consumer.  Deliberately public hooks
+        # remain unauthenticated and can never receive locked Letter content.
+        if _valid_hook_token(request):
+            caller_side = "ai"
+        else:
+            try:
+                caller_side = "human" if sh._is_authenticated(request) else None
+            except Exception:
+                caller_side = None
+
         # This endpoint performs expensive provider work and is intended for a
         # non-browser SessionStart hook.  Do not let an ambient dashboard cookie
         # turn a cross-origin GET into provider spend; explicit hook tokens are
@@ -259,6 +279,8 @@ def register(mcp) -> None:
             return max(minimum, min(maximum, value))
 
         timeout_seconds = setting_int("timeout_seconds", 45, 5, 120)
+        per_call_timeout = setting_int("dehydrate_timeout_seconds", 12, 2, 30)
+        max_dehydrate_calls = setting_int("max_dehydrate_calls", 8, 0, 32)
         token_budget = setting_int("max_tokens", 10_000, 500, 50_000)
         no_store_headers = {
             "Cache-Control": "no-store",
@@ -270,8 +292,14 @@ def register(mcp) -> None:
                 all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
                 pinned = [
                     bucket for bucket in all_buckets
-                    if bucket["metadata"].get("pinned")
-                    or bucket["metadata"].get("protected")
+                    if (
+                        bucket["metadata"].get("pinned")
+                        or bucket["metadata"].get("protected")
+                    )
+                    and _SURFACE_POLICY.evaluate_bucket(
+                        bucket, mode="spontaneous"
+                    ).allowed
+                    and not is_letter_bucket(bucket)
                 ]
                 pinned.sort(
                     key=lambda bucket: (
@@ -287,7 +315,10 @@ def register(mcp) -> None:
                     not in ("permanent", "feel", "plan", "letter", "self", "i")
                     and not bucket["metadata"].get("pinned")
                     and not bucket["metadata"].get("protected")
-                    and not bucket["metadata"].get("dont_surface", False)
+                    and not is_letter_bucket(bucket)
+                    and _SURFACE_POLICY.evaluate_bucket(
+                        bucket, mode="spontaneous"
+                    ).allowed
                 ]
                 scored = sorted(
                     unresolved,
@@ -303,6 +334,8 @@ def register(mcp) -> None:
                 )
                 remaining = token_budget - count_tokens_approx(header)
                 parts: list[str] = []
+                dehydrate_calls = 0
+
                 def append_block(block: str) -> bool:
                     nonlocal remaining
                     cost = count_tokens_approx(block) + 2
@@ -313,15 +346,36 @@ def register(mcp) -> None:
                     return True
 
                 async def append_summary(bucket: dict, *, role: str, prefix: str) -> bool:
+                    nonlocal dehydrate_calls
                     if remaining < _HOOK_MIN_BLOCK_TOKENS:
                         return False
-                    raw = strip_wikilinks(str(bucket.get("content") or "")).strip()
+                    raw = strip_wikilinks(str(bucket.get("content") or ""))
                     if not raw:
                         return True
-                    truncated = len(raw) > 2000
-                    summary = raw[:2000]
-                    if truncated:
-                        summary += "…(原文截断，完整内容 breath 可取)"
+                    if dehydrate_calls >= max_dehydrate_calls:
+                        return False
+                    dehydrate_calls += 1
+                    truncated = False
+                    try:
+                        summary = await asyncio.wait_for(
+                            sh.dehydrator.dehydrate(
+                                raw,
+                                {
+                                    key: value
+                                    for key, value in (bucket.get("metadata") or {}).items()
+                                    if key != "tags"
+                                },
+                            ),
+                            timeout=per_call_timeout,
+                        )
+                    except Exception as exc:
+                        logger.warning("breath_hook dehydration failed: %s", exc)
+                        summary = raw[:1200]
+                        truncated = len(summary) < len(raw)
+                    summary = str(summary or "").strip()
+                    if not summary:
+                        summary = raw[:1200]
+                        truncated = len(summary) < len(raw)
                     block = _hook_data_block(
                         bucket,
                         prefix + summary,
@@ -353,14 +407,30 @@ def register(mcp) -> None:
 
                 letters = [
                     bucket for bucket in all_buckets
-                    if bucket["metadata"].get("type") == "letter"
+                    if is_letter_bucket(bucket)
                 ]
+                normalized_letters = []
+                letter_states = {}
+                for letter in letters:
+                    state = letter_lock_state(letter, caller_side)
+                    letter, state = await normalize_expired_lock(
+                        letter,
+                        state,
+                        caller_side,
+                        bucket_mgr=sh.bucket_mgr,
+                    )
+                    if not letter:
+                        continue
+                    normalized_letters.append(letter)
+                    letter_states[letter["id"]] = state
+                letters = normalized_letters
                 if letters:
                     def latest(*authors: str) -> dict | None:
                         wanted = set(authors)
                         pool = [
                             letter for letter in letters
                             if letter["metadata"].get("author") in wanted
+                            and not letter_states[letter["id"]]["locked"]
                         ]
                         if not pool:
                             return None
@@ -380,6 +450,12 @@ def register(mcp) -> None:
                         if letter is None:
                             continue
                         meta = letter["metadata"]
+                        state = letter_states[letter["id"]]
+                        if state["stored_lock_type"] != "none":
+                            # Locked Letters created by V1 always snapshot the
+                            # actual writer name.  Even the owner's full-text
+                            # excerpt must not introduce generic side labels.
+                            tag = str(meta.get("writer_name") or "").strip() or tag
                         date = meta.get("letter_date") or str(meta.get("created", ""))[:10]
                         title = _bounded_text(meta.get("title") or meta.get("name"), 200)
                         excerpt = strip_wikilinks(str(letter.get("content") or ""))[:400]
@@ -392,10 +468,49 @@ def register(mcp) -> None:
                             )
                         )
 
+                    # Locked incoming Letters are an independent existence
+                    # signal.  Do not let a newer ordinary Letter hide an older
+                    # still-locked one, and do not change the normal "latest
+                    # visible letter per direction" injection above.
+                    if caller_side is not None:
+                        incoming_by_writer: dict[str, list[tuple[dict, dict]]] = {}
+                        for letter in letters:
+                            state = letter_states[letter["id"]]
+                            if not state["locked"]:
+                                continue
+                            meta = letter.get("metadata") or {}
+                            writer_name = str(meta.get("writer_name") or "").strip()
+                            if not writer_name:
+                                continue
+                            incoming_by_writer.setdefault(writer_name, []).append(
+                                (letter, state)
+                            )
+
+                        for writer_name, incoming in incoming_by_writer.items():
+                            representative, state = incoming[0]
+                            if len(incoming) > 1:
+                                notice = f"{writer_name}给你留了 {len(incoming)} 封仍未解锁的信。"
+                            elif state["lock_type"] == "timed":
+                                when = str(state["unlock_date"] or "").replace("T", " ")[:16]
+                                notice = f"{writer_name}给你留了一封带锁的信，将于 {when} 解锁。"
+                            else:
+                                notice = f"{writer_name}给你留了一封永久锁信，当前不可查看。"
+                            append_block(
+                                _hook_data_block(
+                                    representative,
+                                    notice,
+                                    role="locked_letter_notice",
+                                    content_truncated=False,
+                                )
+                            )
+
                 self_buckets = [
                     bucket for bucket in all_buckets
-                    if bucket["metadata"].get("type") == "i"
-                    or "__i__" in (bucket["metadata"].get("tags") or [])
+                    if not is_letter_bucket(bucket)
+                    and (
+                        bucket["metadata"].get("type") == "i"
+                        or "__i__" in (bucket["metadata"].get("tags") or [])
+                    )
                 ]
                 self_buckets.sort(
                     key=lambda bucket: bucket["metadata"].get("created", ""),

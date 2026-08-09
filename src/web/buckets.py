@@ -11,6 +11,9 @@ web/buckets.py — 记忆桶管理 + 设置 + 锚点 + 自我认知读取
 ========================================
 """
 
+import math
+import threading
+import unicodedata
 from contextlib import AsyncExitStack
 
 from starlette.requests import Request
@@ -53,6 +56,23 @@ except ImportError:  # pragma: no cover
         occupies_high_importance_quota_slot as _occupies_high_importance_slot,
     )
 
+try:
+    from tools.plan.core import (  # type: ignore
+        is_letter_bucket,
+        letter_lock_state,
+        safe_letter_metadata,
+    )
+except ImportError:  # pragma: no cover
+    from ..tools.plan.core import (  # type: ignore
+        is_letter_bucket,
+        letter_lock_state,
+        safe_letter_metadata,
+    )
+
+
+_LOCKED_LETTER_NAME = "一封上锁的信"
+_LOCKED_LETTER_NOTICE = "这封信尚未向你开放。"
+
 
 def _datetime_epoch_ms(value) -> int | None:
     """Return one server-normalized instant for Dashboard sorting/display."""
@@ -85,6 +105,9 @@ async def rename_human_in_buckets(old: str, new: str) -> dict:
 
 
 def register(mcp) -> None:
+    # 每次路由注册使用一个原生提交锁，不与 asyncio 事件循环绑定；临界区内
+    # 不执行 await，因此既能跨测试事件循环串行化，也不会因持锁等待而死锁。
+    sampling_commit_lock = threading.Lock()
 
     @mcp.custom_route("/api/buckets", methods=["GET"])
     async def api_buckets(request: Request) -> Response:
@@ -110,14 +133,24 @@ def register(mcp) -> None:
                 meta = b.get("metadata", {})
                 if meta.get("deleted_at"):
                     continue
+                lock_state = letter_lock_state(b, "human")
+                letter_locked = bool(lock_state["locked"])
                 created_epoch_ms = _datetime_epoch_ms(meta.get("created"))
                 last_active_epoch_ms = _datetime_epoch_ms(meta.get("last_active"))
                 result.append({
                     "id": b["id"],
-                    "name": meta.get("name", b["id"]),
+                    "name": (
+                        _LOCKED_LETTER_NAME
+                        if letter_locked
+                        else meta.get("name", b["id"])
+                    ),
                     "type": meta.get("type", "dynamic"),
-                    "domain": meta.get("domain", []),
-                    "tags": meta.get("tags", []),
+                    "domain": (
+                        ["letter"] if letter_locked else meta.get("domain", [])
+                    ),
+                    "tags": (
+                        ["__letter__"] if letter_locked else meta.get("tags", [])
+                    ),
                     "valence": meta.get("valence", 0.5),
                     "arousal": meta.get("arousal", 0.3),
                     "model_valence": meta.get("model_valence"),
@@ -125,19 +158,32 @@ def register(mcp) -> None:
                     "resolved": meta.get("resolved", False),
                     "pinned": meta.get("pinned", False),
                     "digested": meta.get("digested", False),
+                    "imported": parse_bool(meta.get("imported"), default=False)
+                    or str(meta.get("source_tool") or "").strip() == "import",
                     "created": meta.get("created", ""),
                     "created_epoch_ms": created_epoch_ms,
                     "last_active": meta.get("last_active", ""),
                     "last_active_epoch_ms": last_active_epoch_ms,
                     "activation_count": meta.get("activation_count", 0),
                     "score": sh.decay_engine.calculate_score(meta),
-                    "content_preview": strip_wikilinks(b.get("content", ""))[:200],
+                    "content_preview": (
+                        _LOCKED_LETTER_NOTICE
+                        if letter_locked
+                        else strip_wikilinks(b.get("content", ""))[:200]
+                    ),
+                    "letter_locked": letter_locked,
+                    "lock_type": lock_state["lock_type"],
+                    "unlock_date": lock_state["unlock_date"],
                     # iter 1.8 新增字段（后台老桶读出默认值）
-                    "why_remembered": meta.get("why_remembered", ""),
+                    "why_remembered": (
+                        "" if letter_locked else meta.get("why_remembered", "")
+                    ),
                     "dont_surface": bool(meta.get("dont_surface", False)),
                     "first_of_kind": bool(meta.get("first_of_kind", False)),
                     "weight": meta.get("weight"),  # plan 专有，非 plan 为 None
-                    "triggered_by": meta.get("triggered_by", ""),
+                    "triggered_by": (
+                        "" if letter_locked else meta.get("triggered_by", "")
+                    ),
                     "erasable_test_data": bool(
                         isinstance(meta.get("provenance"), dict)
                         and meta["provenance"].get("kind") == "test"
@@ -179,6 +225,30 @@ def register(mcp) -> None:
         if not bucket:
             return JSONResponse({"error": "not found"}, status_code=404)
         meta = bucket.get("metadata", {})
+        lock_state = letter_lock_state(bucket, "human")
+        if lock_state["locked"]:
+            safe_letter = safe_letter_metadata(bucket, "human")
+            return JSONResponse({
+                "id": bucket["id"],
+                "metadata": {
+                    "name": _LOCKED_LETTER_NAME,
+                    "type": meta.get("type", "letter"),
+                    "domain": ["letter"],
+                    "author": safe_letter["author"],
+                    "user_name": safe_letter["user_name"],
+                    "writer_name": safe_letter["writer_name"],
+                    "letter_date": safe_letter["date"],
+                    "created": safe_letter["created"],
+                    "lock_type": safe_letter["lock_type"],
+                    "unlock_date": safe_letter["unlock_date"],
+                    "locked": True,
+                },
+                "content": "",
+                "display_content": _LOCKED_LETTER_NOTICE,
+                "score": sh.decay_engine.calculate_score(meta),
+                "triggered_feels": [],
+                "letter_locked": True,
+            })
         # iter 1.9 D / iter 2.0 §10 U-04: 反向链——只扫 feel_dir，O(feel桶数) 而非全库扫描
         triggered_feels = []
         try:
@@ -196,6 +266,7 @@ def register(mcp) -> None:
             "display_content": strip_wikilinks(raw_content),
             "score": sh.decay_engine.calculate_score(meta),
             "triggered_feels": triggered_feels,  # iter 1.9 D
+            "letter_locked": False,
         })
 
 
@@ -220,6 +291,11 @@ def register(mcp) -> None:
                 if not bucket:
                     return JSONResponse({"error": "not found"}, status_code=404)
                 meta = bucket.get("metadata", {})
+                if is_letter_bucket(bucket):
+                    return JSONResponse(
+                        {"error": "letters cannot be pinned from the bucket API"},
+                        status_code=403,
+                    )
                 if _is_terminal_memory_metadata(meta):
                     return JSONResponse(
                         {"error": "archived buckets cannot be pinned or unpinned"},
@@ -233,6 +309,36 @@ def register(mcp) -> None:
                     current_importance = int(meta.get("importance") or 0)
                 except (TypeError, ValueError):
                     current_importance = 0
+                unpin_importance = current_importance
+                if current_pinned and not protected:
+                    try:
+                        body = await sh._read_json_object(request)
+                        raw_importance = body.get("importance")
+                        if isinstance(raw_importance, bool):
+                            raise ValueError("boolean is not an importance")
+                        unpin_importance = int(raw_importance)
+                        if (
+                            isinstance(raw_importance, float)
+                            and not raw_importance.is_integer()
+                        ):
+                            raise ValueError("fractional importance")
+                    except Exception:
+                        return JSONResponse(
+                            {
+                                "error": "unpin requires importance=1..10 in the same request",
+                                "field": "importance",
+                            },
+                            status_code=400,
+                        )
+                    if not 1 <= unpin_importance <= 10:
+                        return JSONResponse(
+                            {
+                                "error": "unpin requires importance=1..10 in the same request",
+                                "field": "importance",
+                            },
+                            status_code=400,
+                        )
+                    update_kwargs["importance"] = unpin_importance
                 current_type = str(
                     meta.get("type") or "dynamic"
                 ).strip().lower()
@@ -252,7 +358,7 @@ def register(mcp) -> None:
                 })
                 after_quota_meta = dict(before_quota_meta)
                 after_quota_meta.update({
-                    "importance": 10 if new_pinned else current_importance,
+                    "importance": 10 if new_pinned else unpin_importance,
                     "pinned": new_pinned,
                     "type": final_type,
                 })
@@ -272,6 +378,11 @@ def register(mcp) -> None:
                 locked_meta = locked_bucket.get("metadata", {})
                 if not isinstance(locked_meta, dict):
                     locked_meta = {}
+                if is_letter_bucket(locked_bucket):
+                    return JSONResponse(
+                        {"error": "letter state changed concurrently"},
+                        status_code=409,
+                    )
                 if _is_terminal_memory_metadata(locked_meta):
                     return JSONResponse(
                         {"error": "bucket was archived concurrently"},
@@ -319,12 +430,16 @@ def register(mcp) -> None:
                     # same BucketManager transaction.
                     if occupies_high_after and not occupied_high_before:
                         adjusted_importance = (
-                            await _enforce_high_importance_quota(current_importance)
+                            await _enforce_high_importance_quota(unpin_importance)
                         )
-                        if adjusted_importance != current_importance:
+                        if adjusted_importance != unpin_importance:
                             update_kwargs["importance"] = adjusted_importance
 
-                ok = await sh.bucket_mgr.update(bucket_id, **update_kwargs)
+                ok = await sh.bucket_mgr.update(
+                    bucket_id,
+                    event_actor="human",
+                    **update_kwargs,
+                )
                 if not ok:
                     latest = await sh.bucket_mgr.get(bucket_id)
                     if _is_terminal_memory_metadata(
@@ -630,8 +745,12 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        surfacing = sh.config.setdefault("surfacing", {})
-        sampling = surfacing.setdefault("sampling", {})
+        surfacing = sh.config.get("surfacing")
+        if not isinstance(surfacing, dict):
+            surfacing = {}
+        sampling = surfacing.get("sampling")
+        if not isinstance(sampling, dict):
+            sampling = {}
         if request.method == "GET":
             return JSONResponse({
                 "enabled": parse_bool(sampling.get("enabled", False), default=False),
@@ -643,52 +762,105 @@ def register(mcp) -> None:
             body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        # Validate ranges; reject silently-corrupt inputs at the boundary
-        try:
-            if "enabled" in body:
-                sampling["enabled"] = parse_bool(body["enabled"])
-            if "top_k" in body:
-                tk = int(body["top_k"])
-                if not (1 <= tk <= 50):
-                    return JSONResponse({"error": "top_k must be in [1,50]"}, status_code=400)
-                sampling["top_k"] = tk
-            if "sample_k" in body:
-                sk = int(body["sample_k"])
-                if not (1 <= sk <= 20):
-                    return JSONResponse({"error": "sample_k must be in [1,20]"}, status_code=400)
-                sampling["sample_k"] = sk
-            if "temperature" in body:
-                t = float(body["temperature"])
-                if not (0.1 <= t <= 5.0):
-                    return JSONResponse({"error": "temperature must be in [0.1,5.0]"}, status_code=400)
-                sampling["temperature"] = t
-        except (ValueError, TypeError) as e:
-            return JSONResponse({"error": f"invalid field type: {e}"}, status_code=400)
+        # JSON 读取已经结束，以下原生锁临界区内没有 await。锁覆盖候选快照、
+        # 落盘和运行态发布，防止并发更新丢字段或出现磁盘/运行态逆序。
+        with sampling_commit_lock:
+            live_surfacing = sh.config.get("surfacing")
+            if not isinstance(live_surfacing, dict):
+                live_surfacing = {}
+            live_sampling = live_surfacing.get("sampling")
+            if not isinstance(live_sampling, dict):
+                live_sampling = {}
 
-        # --- 写回 config.yaml（iter 2.0 §10 U-03 修复：重启后设置不丢失）---
-        def _mutate_sampling(save_config: dict) -> None:
-            sf = save_config.setdefault("surfacing", {})
-            if not isinstance(sf, dict):
-                sf = {}
-                save_config["surfacing"] = sf
-            samp = sf.setdefault("sampling", {})
-            if not isinstance(samp, dict):
-                samp = {}
-                sf["sampling"] = samp
-            samp.update({
-                "enabled": sampling.get("enabled", False),
-                "top_k": sampling.get("top_k", 5),
-                "sample_k": sampling.get("sample_k", 2),
-                "temperature": sampling.get("temperature", 0.7),
-            })
-        try:
-            atomic_update_config_yaml(_mutate_sampling)
-        except Exception as e:
-            # 之前这里只 logger.warning、仍回 ok:True——用户看到"已保存"，
-            # 磁盘其实没落地，下次重启（崩溃/热更新）设置又变回旧值。如实报错。
-            return JSONResponse({"error": f"采样设置写入磁盘失败，未保存：{e}"}, status_code=500)
+            # 先在独立候选副本上完成全部校验。若逐字段发布，后续字段无效或
+            # config.yaml 写入失败时，运行态会残留一半新、一半旧的配置。
+            candidate = dict(live_sampling)
+            try:
+                if "enabled" in body:
+                    candidate["enabled"] = parse_bool(body["enabled"])
+                if "top_k" in body:
+                    if isinstance(body["top_k"], bool):
+                        raise ValueError("top_k must be an integer")
+                    tk = int(body["top_k"])
+                    if isinstance(body["top_k"], float) and body["top_k"] != tk:
+                        raise ValueError("top_k must be an integer")
+                    if not (1 <= tk <= 50):
+                        return JSONResponse(
+                            {"error": "top_k must be in [1,50]"}, status_code=400
+                        )
+                    candidate["top_k"] = tk
+                if "sample_k" in body:
+                    if isinstance(body["sample_k"], bool):
+                        raise ValueError("sample_k must be an integer")
+                    sk = int(body["sample_k"])
+                    if (
+                        isinstance(body["sample_k"], float)
+                        and body["sample_k"] != sk
+                    ):
+                        raise ValueError("sample_k must be an integer")
+                    if not (1 <= sk <= 20):
+                        return JSONResponse(
+                            {"error": "sample_k must be in [1,20]"},
+                            status_code=400,
+                        )
+                    candidate["sample_k"] = sk
+                if "temperature" in body:
+                    if isinstance(body["temperature"], bool):
+                        raise ValueError("temperature must be a number")
+                    temperature = float(body["temperature"])
+                    if not math.isfinite(temperature) or not (
+                        0.1 <= temperature <= 5.0
+                    ):
+                        return JSONResponse(
+                            {"error": "temperature must be in [0.1,5.0]"},
+                            status_code=400,
+                        )
+                    candidate["temperature"] = temperature
+            except (OverflowError, ValueError, TypeError) as e:
+                return JSONResponse(
+                    {"error": f"invalid field type: {e}"}, status_code=400
+                )
 
-        return JSONResponse({"ok": True, **sampling})
+            # 写回 config.yaml，保证重启后设置不丢失。
+            def _mutate_sampling(save_config: dict) -> None:
+                sf = save_config.setdefault("surfacing", {})
+                if not isinstance(sf, dict):
+                    sf = {}
+                    save_config["surfacing"] = sf
+                samp = sf.setdefault("sampling", {})
+                if not isinstance(samp, dict):
+                    samp = {}
+                    sf["sampling"] = samp
+                samp.update({
+                    "enabled": candidate.get("enabled", False),
+                    "top_k": candidate.get("top_k", 5),
+                    "sample_k": candidate.get("sample_k", 2),
+                    "temperature": candidate.get("temperature", 0.7),
+                })
+
+            try:
+                atomic_update_config_yaml(_mutate_sampling)
+            except Exception as e:
+                # 磁盘未落地就如实报错，不能让用户看到“已保存”。
+                return JSONResponse(
+                    {"error": f"采样设置写入磁盘失败，未保存：{e}"},
+                    status_code=500,
+                )
+
+            # 以磁盘写入成功为提交点；尽量保留原嵌套字典对象，因为浮现逻辑
+            # 可能持有这个对象的引用。
+            published_surfacing = sh.config.get("surfacing")
+            if not isinstance(published_surfacing, dict):
+                published_surfacing = {}
+                sh.config["surfacing"] = published_surfacing
+            published_sampling = published_surfacing.get("sampling")
+            if not isinstance(published_sampling, dict):
+                published_sampling = {}
+                published_surfacing["sampling"] = published_sampling
+            published_sampling.clear()
+            published_sampling.update(candidate)
+
+            return JSONResponse({"ok": True, **published_sampling})
 
 
     # ---- iter 2.0: /api/settings/human — 读写通知称呼（human 宏）----
@@ -714,6 +886,11 @@ def register(mcp) -> None:
             human = "人类"
         if len(human) > 20:
             return JSONResponse({"error": "human name must be ≤ 20 characters"}, status_code=400)
+        if any(unicodedata.category(char).startswith("C") for char in human):
+            return JSONResponse(
+                {"error": "human name must not contain control characters"},
+                status_code=400,
+            )
         # Config read/write, live runtime update and the full-vault replacement
         # are one outer transaction.  Without it, concurrent A->B and B->C
         # requests can interleave their per-bucket writes and leave mixed names.
@@ -799,15 +976,30 @@ def register(mcp) -> None:
         items = []
         for b in anchors:
             m = b.get("metadata", {})
+            lock_state = letter_lock_state(b, "human")
+            letter_locked = bool(lock_state["locked"])
             items.append({
                 "id": b["id"],
-                "name": m.get("name") or b["id"],
+                "name": (
+                    _LOCKED_LETTER_NAME
+                    if letter_locked
+                    else m.get("name") or b["id"]
+                ),
                 "created": m.get("created", ""),
-                "domain": m.get("domain", []),
-                "tags": m.get("tags", []),
+                "domain": (
+                    ["letter"] if letter_locked else m.get("domain", [])
+                ),
+                "tags": (
+                    ["__letter__"] if letter_locked else m.get("tags", [])
+                ),
                 "type": m.get("type", "dynamic"),
                 "pinned": bool(m.get("pinned", False)),
-                "preview": (b.get("content", "") or "")[:80],
+                "preview": (
+                    _LOCKED_LETTER_NOTICE
+                    if letter_locked
+                    else (b.get("content", "") or "")[:80]
+                ),
+                "letter_locked": letter_locked,
             })
         return JSONResponse({
             "ok": True,
@@ -903,8 +1095,11 @@ def register(mcp) -> None:
             all_b = await sh.bucket_mgr.list_all(include_archive=False)
             self_buckets = [
                 b for b in all_b
-                if b["metadata"].get("type") == "i"
-                or "__i__" in (b["metadata"].get("tags") or [])
+                if not is_letter_bucket(b)
+                and (
+                    b["metadata"].get("type") == "i"
+                    or "__i__" in (b["metadata"].get("tags") or [])
+                )
             ]
             self_buckets.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
             result = []
