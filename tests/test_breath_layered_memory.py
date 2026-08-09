@@ -291,6 +291,93 @@ async def test_weighted_limit_yields_seats_to_recency(bucket_mgr, decay_eng):
 
 
 # ------------------------------------------------------------
+# last_event_at 真实落盘（官端 sol 判词：不能只检查 mock 收到了参数）
+# ------------------------------------------------------------
+
+def _norm_ts(v) -> str:
+    """frontmatter 读回的时间可能是 datetime 或 str，归一化到秒级比较。"""
+    return str(v).replace("T", " ")[:19]
+
+
+class _SameEventJudge:
+    async def judge_same_event(self, old, new):
+        return {"same_event": True, "confidence": 1.0}
+
+    async def merge(self, old, new):
+        return old + "\n" + new
+
+    async def dehydrate(self, content, meta=None):
+        return content
+
+
+@pytest.mark.asyncio
+async def test_merge_refreshes_last_event_at_on_disk(bucket_mgr, decay_eng, monkeypatch):
+    """旧桶并入新事件后，从 Markdown 重读，last_event_at 必须真实变化。"""
+    import tools._common as common
+
+    install_runtime(bucket_mgr, decay_eng)
+    rt.dehydrator = _SameEventJudge()
+    old_ts = _iso(datetime.now() - timedelta(days=30))
+
+    bid = await bucket_mgr.create(
+        content="祖传旧事的原始正文", importance=5, domain=["测试"]
+    )
+    _set_meta(bucket_mgr, bid,
+              created=old_ts, last_active=old_ts, last_event_at=old_ts)
+
+    async def fake_search(*a, **k):
+        return [{"id": bid, "score": 99}]
+
+    monkeypatch.setattr(bucket_mgr, "search", fake_search)
+
+    _, merged, _ = await common.merge_or_create(
+        content="同一事件后来发生的新细节", tags=[], importance=5,
+        domain=["测试"], valence=0.5, arousal=0.3,
+        raw_merge=True, source_tool="hold",
+    )
+    assert merged is True, "前置条件：必须真的走了合并分支"
+
+    fresh = await bucket_mgr.get(bid)
+    new_val = _norm_ts(fresh["metadata"].get("last_event_at"))
+    assert new_val and new_val != _norm_ts(old_ts), (
+        "合并新事件后 last_event_at 必须在盘上刷新——update 白名单漏了它就会静默丢失"
+    )
+
+
+@pytest.mark.asyncio
+async def test_identical_resubmit_does_not_refresh_last_event_at(
+    bucket_mgr, decay_eng, monkeypatch
+):
+    """幂等：一字不差的重复提交（网络重试）不得刷新 last_event_at。"""
+    import tools._common as common
+
+    install_runtime(bucket_mgr, decay_eng)
+    rt.dehydrator = _SameEventJudge()
+    old_ts = _iso(datetime.now() - timedelta(days=30))
+    body = "一字不差的祖传正文"
+
+    bid = await bucket_mgr.create(content=body, importance=5, domain=["测试"])
+    _set_meta(bucket_mgr, bid,
+              created=old_ts, last_active=old_ts, last_event_at=old_ts)
+
+    async def fake_search(*a, **k):
+        return [{"id": bid, "score": 99}]
+
+    monkeypatch.setattr(bucket_mgr, "search", fake_search)
+
+    await common.merge_or_create(
+        content=body, tags=[], importance=5,
+        domain=["测试"], valence=0.5, arousal=0.3,
+        raw_merge=True, source_tool="hold",
+    )
+
+    fresh = await bucket_mgr.get(bid)
+    assert _norm_ts(fresh["metadata"].get("last_event_at")) == _norm_ts(old_ts), (
+        "内容未变的重复提交不得刷新——祖传旧事不能穿着新时间戳混进近期池"
+    )
+
+
+# ------------------------------------------------------------
 # render_index_line
 # ------------------------------------------------------------
 

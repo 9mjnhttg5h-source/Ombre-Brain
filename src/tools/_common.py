@@ -929,7 +929,10 @@ async def _merge_or_create_inner(
                         update_kwargs["last_merged_by"] = source_tool
                     # 分层浮现 v3：合并=新事件并入旧桶，刷新事件时间戳。
                     # 读取/搜索/普通编辑不刷——它只认"发生了新的事"。
-                    update_kwargs["last_event_at"] = now_iso()
+                    # 幂等：内容未变（重复提交/网络重试）不刷新，否则
+                    # 祖传旧事会穿着新时间戳混进近期池。（官端sol判词原文）
+                    if merged != snapshot_content:
+                        update_kwargs["last_event_at"] = now_iso()
                     if meaning:
                         update_kwargs["meaning_append"] = meaning
                     if media:

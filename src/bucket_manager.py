@@ -2373,6 +2373,9 @@ class BucketManager:
             post["importance"] = _clamp_importance(kwargs["importance"], f"update:{bucket_id}")
         if "domain" in kwargs:
             post["domain"] = kwargs["domain"]
+        if "last_event_at" in kwargs:
+            # 分层浮现 v3：合并新事件时由 _common 传入；普通编辑不传不刷。
+            post["last_event_at"] = kwargs["last_event_at"]
         if "valence" in kwargs:
             post["valence"] = _clamp_unit(kwargs["valence"], "valence", f"update:{bucket_id}")
         if "arousal" in kwargs:
