@@ -72,3 +72,4 @@ kernel/rust/**/target/
 kernel/rust/ombre-kernel/Cargo.lock
 .tmp/ombre-nodes-v2.yaml
 .tmp/
+.quarantine/
