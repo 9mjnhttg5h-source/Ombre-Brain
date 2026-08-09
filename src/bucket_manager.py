@@ -1506,6 +1506,7 @@ class BucketManager:
             "type": bucket_type,
             "created": created_at,
             "last_active": created_at,
+            "last_event_at": created_at,
             "activation_count": 0,
         }
         if title:

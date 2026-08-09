@@ -37,7 +37,7 @@ import math
 import threading
 
 from bucket_manager import _filesystem_turn as _kernel_filesystem_turn
-from utils import normalize_memory_title, parse_bool
+from utils import normalize_memory_title, now_iso, parse_bool
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
 from . import _runtime as rt
@@ -927,6 +927,9 @@ async def _merge_or_create_inner(
                         update_kwargs["source_refs_append"] = source_refs
                     if source_tool:
                         update_kwargs["last_merged_by"] = source_tool
+                    # 分层浮现 v3：合并=新事件并入旧桶，刷新事件时间戳。
+                    # 读取/搜索/普通编辑不刷——它只认"发生了新的事"。
+                    update_kwargs["last_event_at"] = now_iso()
                     if meaning:
                         update_kwargs["meaning_append"] = meaning
                     if media:

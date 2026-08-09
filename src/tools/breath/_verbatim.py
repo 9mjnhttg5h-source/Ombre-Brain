@@ -37,6 +37,58 @@ def _miss_block(bucket: dict) -> str:
     return ("\n" + "\n".join(lines)) if lines else ""
 
 
+def render_index_line(
+    bucket: dict,
+    label: str = "索引",
+    emoji: str = "🔧",
+    note: str = "",
+) -> tuple[str, int]:
+    """Single-line index rendering for tech-domain / budget-degraded buckets.
+
+    预览内容（title / meaning / 正文前 40 字）仍是存储数据，必须留在
+    stored_data_marker 边界内——缩写不等于解除防注入。输出强制单行。
+    title 优先；无 title 时用去掉 19 位时间前缀的 name；meaning 取最新
+    一条非空（不是首条）。
+    """
+    meta = bucket.get("metadata", {}) or {}
+    bid = str(bucket.get("id") or "")
+    title = str(meta.get("title") or "").strip()
+    if not title:
+        raw_name = str(meta.get("name") or bid).strip()
+        prefix = raw_name[:19]
+        if (
+            len(prefix) == 19
+            and prefix[4] == "-" and prefix[7] == "-"
+            and prefix[10] == " " and prefix[13] == "-" and prefix[16] == "-"
+        ):
+            title = raw_name[19:].strip() or raw_name
+        else:
+            title = raw_name
+    created = str(meta.get("created") or "")[:10]
+    meanings = [
+        str(m).strip() for m in (meta.get("meaning") or []) if str(m).strip()
+    ]
+    preview_src = meanings[-1] if meanings else stored_bucket_content(bucket)
+    preview = " ".join(str(preview_src).split())[:40]
+    doms = meta.get("domain")
+    if isinstance(doms, list):
+        dom_str = ",".join(s for s in (str(x).strip() for x in doms) if s)
+    else:
+        dom_str = str(doms or "").strip()
+    payload = " ".join(f"{title}｜{created}｜{preview}".splitlines())
+    boundary = stored_data_marker(
+        payload, provenance=f"breath-index:{bid}"
+    )
+    rendered = (
+        f"{emoji} [{label}] [domain:{dom_str}] [bucket_id:{bid}] "
+        f"{boundary}{payload}"
+    )
+    if note:
+        rendered += f" {note}"
+    rendered = " ".join(rendered.splitlines())
+    return rendered, count_tokens_approx(rendered)
+
+
 def render_stored_bucket(
     bucket: dict,
     metadata_header: str,
