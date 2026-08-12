@@ -188,6 +188,33 @@
 
   .content { padding: 32px 40px; }
 
+  .digest-shell { max-width: 920px; margin: 0 auto; }
+  .digest-intro { margin: 0 0 26px; color: var(--text-dim); font-size: 13px; line-height: 1.7; }
+  .digest-group + .digest-group { margin-top: 34px; }
+  .digest-group-title {
+    margin: 0 0 14px;
+    color: var(--accent);
+    font-family: 'Cormorant Garamond', 'Noto Serif SC', serif;
+    font-size: 20px;
+    font-weight: 600;
+  }
+  .digest-group-title .en { margin-left: 6px; color: var(--text-light); font-size: 11px; }
+  .digest-list { display: flex; flex-direction: column; gap: 16px; }
+  .digest-card {
+    padding: 20px 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    box-shadow: 5px 5px 12px var(--shadow-dark-subtle), -5px -5px 12px var(--shadow-light);
+  }
+  .digest-card-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .digest-card-key { color: var(--accent); font-family: 'Share Tech Mono', monospace; font-size: 15px; font-weight: 700; }
+  .digest-card-period { color: var(--text-dim); font-size: 11px; letter-spacing: 0.03em; }
+  .digest-card-body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-size: 14px; line-height: 1.8; }
+  .digest-source-line { color: var(--text-light); font-size: 0.82em; }
+  .digest-empty { padding: 28px 18px; color: var(--text-dim); text-align: center; font-size: 13px; }
+  .digest-error { color: var(--negative); }
+
   .filters {
     display: flex;
     gap: 10px;
@@ -1898,6 +1925,7 @@
   <div class="tab" data-tab="plan"><span>计划</span><span class="tab-en">Plans</span></div>
   <div class="tab" data-tab="letters"><span>信</span><span class="tab-en">Letters</span></div>
   <div class="tab" data-tab="anchors"><span>锚点</span><span class="tab-en">Anchors</span></div>
+  <div class="tab" data-tab="digests"><span>周忆·月忆</span><span class="tab-en">Digests</span></div>
   <div class="tab" data-tab="import"><span>导入</span><span class="tab-en">Import</span></div>
   <div class="tab" data-tab="faq"><span>帮助</span><span class="tab-en">FAQ</span></div>
   <div class="tab" data-tab="logs"><span>日志</span><span class="tab-en">Logs</span></div>
@@ -1967,6 +1995,20 @@
     </summary>
     <div id="forgotten-list" style="margin-top:10px;"></div>
   </details>
+</div>
+
+<div class="content" id="digests-view" style="display:none">
+  <div class="digest-shell">
+    <p class="digest-intro">把每周、每月沉淀下来的记忆放在一起，按时间慢慢读。</p>
+    <section class="digest-group" aria-labelledby="weekly-digests-title">
+      <h2 class="digest-group-title" id="weekly-digests-title">周忆 <span class="en">Weekly</span></h2>
+      <div class="digest-list" id="weekly-digests"><div class="digest-empty">加载中… / Loading…</div></div>
+    </section>
+    <section class="digest-group" aria-labelledby="monthly-digests-title">
+      <h2 class="digest-group-title" id="monthly-digests-title">月忆 <span class="en">Monthly</span></h2>
+      <div class="digest-list" id="monthly-digests"><div class="digest-empty">加载中… / Loading…</div></div>
+    </section>
+  </div>
 </div>
 
 <div class="content" id="breath-view" style="display:none">
@@ -4562,6 +4604,7 @@ function activateDashboardTab(tab) {
     document.getElementById('settings-view').style.display = target === 'settings' ? '' : 'none';
     document.getElementById('letters-view').style.display = target === 'letters' ? '' : 'none';
     document.getElementById('anchors-view').style.display = target === 'anchors' ? '' : 'none';
+    document.getElementById('digests-view').style.display = target === 'digests' ? '' : 'none';
     document.getElementById('about-view').style.display = target === 'about' ? '' : 'none';
     if (target !== 'network' && _netRAF) { cancelAnimationFrame(_netRAF); _netRAF = null; }
     if (target === 'network') pending.push(loadNetwork());
@@ -4591,6 +4634,7 @@ function activateDashboardTab(tab) {
     }
     if (target === 'letters') pending.push(loadLetters());
     if (target === 'anchors') pending.push(loadAnchorsView());
+    if (target === 'digests') pending.push(loadDigests());
     if (target === 'about') pending.push(loadAbout());
     return Promise.allSettled(pending);
 }
@@ -4915,6 +4959,94 @@ async function searchBuckets(query) {
     }
   } catch (e) { /* 离线 / 无向量化：退化为纯本地字面 + 模糊匹配 */ }
   renderBuckets(merged);
+}
+
+let digestLoadGeneration = 0;
+
+function parseDigestIdentity(content, tags, created) {
+  var text = String(content || '');
+  var meta = text.match(/^\s*digest_key:\s*([^|\r\n]+?)\s*\|\s*period:\s*([^|\r\n]+?)(?:\s*\||\s*$)/mi);
+  var tagKey = (Array.isArray(tags) ? tags : []).find(function(tag) {
+    return /^\d{4}-(?:W|M)\d{2}$/.test(String(tag));
+  });
+  return {
+    key: meta ? meta[1].trim() : (tagKey || '未标记周期'),
+    period: meta ? meta[2].trim() : (String(created || '').slice(0, 10) || '日期未知'),
+  };
+}
+
+function renderDigestBody(content) {
+  return String(content || '').split(/(\r?\n)/).map(function(part) {
+    if (/^\r?\n$/.test(part)) return part;
+    var safe = esc(part);
+    return /^\s*覆盖来源：/.test(part)
+      ? '<span class="digest-source-line">' + safe + '</span>'
+      : safe;
+  }).join('');
+}
+
+function renderDigestGroup(element, items, emptyText) {
+  if (!items.length) {
+    element.innerHTML = '<div class="digest-empty">' + esc(emptyText) + '</div>';
+    return;
+  }
+  element.innerHTML = items.map(function(item) {
+    if (item.error) {
+      return '<article class="digest-card digest-error"><div class="digest-card-key">' + esc(item.digestKey) + '</div>' +
+        '<div style="margin-top:8px;font-size:12px;">全文加载失败：' + esc(item.error) + '</div></article>';
+    }
+    return '<article class="digest-card">' +
+      '<header class="digest-card-head"><span class="digest-card-key">' + esc(item.digestKey) + '</span>' +
+      '<span class="digest-card-period">' + esc(item.period) + '</span></header>' +
+      '<div class="digest-card-body">' + renderDigestBody(item.content) + '</div></article>';
+  }).join('');
+}
+
+async function loadDigests() {
+  var generation = ++digestLoadGeneration;
+  var weekly = document.getElementById('weekly-digests');
+  var monthly = document.getElementById('monthly-digests');
+  weekly.innerHTML = monthly.innerHTML = '<div class="digest-empty">加载中… / Loading…</div>';
+  try {
+    var listRes = await fetch(BASE + '/api/buckets?sort=created_desc');
+    var buckets = await readJsonSafe(listRes);
+    if (!listRes.ok || !Array.isArray(buckets)) throw new Error((buckets && buckets.error) || ('HTTP ' + listRes.status));
+    var digestBuckets = buckets.filter(function(bucket) {
+      var tags = Array.isArray(bucket.tags) ? bucket.tags : [];
+      return tags.includes('digest') && (tags.includes('周摘') || tags.includes('月摘'));
+    });
+    var items = await Promise.all(digestBuckets.map(async function(bucket) {
+      var tags = Array.isArray(bucket.tags) ? bucket.tags : [];
+      var fallback = parseDigestIdentity('', tags, bucket.created);
+      try {
+        var detailRes = await fetch(BASE + '/api/bucket/' + encodeURIComponent(bucket.id));
+        var detail = await readJsonSafe(detailRes);
+        if (!detailRes.ok || !detail || typeof detail !== 'object' || Array.isArray(detail)) {
+          throw new Error((detail && detail.error) || ('HTTP ' + detailRes.status));
+        }
+        var identity = parseDigestIdentity(detail.content, tags, bucket.created);
+        return {
+          kind: tags.includes('周摘') ? 'weekly' : 'monthly',
+          digestKey: identity.key, period: identity.period, content: detail.content || '', created: bucket.created || '',
+        };
+      } catch (error) {
+        return {
+          kind: tags.includes('周摘') ? 'weekly' : 'monthly',
+          digestKey: fallback.key, period: fallback.period, content: '', created: bucket.created || '', error: error.message,
+        };
+      }
+    }));
+    if (generation !== digestLoadGeneration) return;
+    items.sort(function(a, b) {
+      return String(b.digestKey).localeCompare(String(a.digestKey)) || String(b.created).localeCompare(String(a.created));
+    });
+    renderDigestGroup(weekly, items.filter(function(item) { return item.kind === 'weekly'; }), '还没有周忆，周末会慢慢长出来');
+    renderDigestGroup(monthly, items.filter(function(item) { return item.kind === 'monthly'; }), '还没有月忆，月初会长出来');
+  } catch (error) {
+    if (generation !== digestLoadGeneration) return;
+    var message = '<div class="digest-empty digest-error">加载失败：' + esc(error.message) + '</div>';
+    weekly.innerHTML = monthly.innerHTML = message;
+  }
 }
 
 let detailLoadGeneration = 0;
