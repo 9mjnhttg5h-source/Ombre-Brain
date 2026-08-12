@@ -32,7 +32,12 @@ from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
 from utils import count_tokens_approx, parse_bool, parse_iso_datetime
-from ._verbatim import render_index_line, render_stored_bucket
+from ._verbatim import (
+    normalize_envelope_mode,
+    render_index_line,
+    render_stored_bucket,
+    wrap_memory_data_block,
+)
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
 # 库小且 sampling=ON 时此分支每次 breath 都触发，原本会刷屏；改为 ≥300s
@@ -60,6 +65,27 @@ def _can_surface(bucket: dict) -> bool:
 
 def _budget_notice(*, omitted: int, used: int, limit: int) -> str:
     return _BUDGET_NOTICE.format(omitted=omitted, used=used, limit=limit)
+
+
+def _surface_envelope_mode() -> str:
+    surfacing_cfg = rt.config.get("surfacing", {}) or {}
+    return normalize_envelope_mode(surfacing_cfg.get("envelope_mode", "block"))
+
+
+def _render_stored_bucket(*args, **kwargs):
+    return render_stored_bucket(
+        *args, envelope_mode=_surface_envelope_mode(), **kwargs
+    )
+
+
+def _render_index_line(*args, **kwargs):
+    return render_index_line(
+        *args, envelope_mode=_surface_envelope_mode(), **kwargs
+    )
+
+
+def _wrap_surface_results(payload: str) -> str:
+    return wrap_memory_data_block(payload, _surface_envelope_mode())
 
 
 async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -> str:
@@ -114,7 +140,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     primary_omitted = 0
     for b in pinned_buckets:
         try:
-            rendered, entry_tokens = render_stored_bucket(
+            rendered, entry_tokens = _render_stored_bucket(
                 b,
                 f"📌 [核心准则] [bucket_id:{b['id']}]",
                 _footprint(b),
@@ -247,7 +273,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     for b in candidates:
         try:
             score = rt.decay_engine.calculate_score(b["metadata"])
-            rendered, entry_tokens = render_stored_bucket(
+            rendered, entry_tokens = _render_stored_bucket(
                 b,
                 f"[权重:{score:.2f}] [bucket_id:{b['id']}]",
                 _footprint(b),
@@ -313,7 +339,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             random.shuffle(passive_pool)
             for b in passive_pool[:2]:
                 try:
-                    rendered, entry_tokens = render_stored_bucket(
+                    rendered, entry_tokens = _render_stored_bucket(
                         b,
                         f"💤 [久未浮现] [bucket_id:{b['id']}]",
                         _footprint(b),
@@ -347,7 +373,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
                 random.shuffle(resolved_pool)
                 for b in resolved_pool[:3]:
                     try:
-                        rendered, entry_tokens = render_stored_bucket(
+                        rendered, entry_tokens = _render_stored_bucket(
                             b,
                             f"✨ [偶遇] [bucket_id:{b['id']}]",
                             _footprint(b),
@@ -381,7 +407,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
                 limit=max_tokens,
             )
         )
-    return "\n\n".join(parts)
+    return _wrap_surface_results("\n\n".join(parts))
 
 # ============================================================
 # 分层浮现 v3（layered_memory.enabled=true 时的独立路径）
@@ -447,7 +473,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
     primary_omitted = 0
     for b in pinned_buckets:
         try:
-            rendered, entry_tokens = render_stored_bucket(
+            rendered, entry_tokens = _render_stored_bucket(
                 b,
                 f"📌 [核心准则] [bucket_id:{b['id']}]",
                 _footprint(b),
@@ -514,7 +540,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
     recency_results = []
     for b in recency_selected:
         try:
-            rendered, entry_tokens = render_stored_bucket(
+            rendered, entry_tokens = _render_stored_bucket(
                 b, f"🌱 [近期] [bucket_id:{b['id']}]", _footprint(b)
             )
             if entry_tokens > token_budget:
@@ -523,7 +549,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
                     f'[正文未展开：预算不足，'
                     f'详情 breath_search(query="{b["id"]}")]'
                 )
-                rendered, entry_tokens = render_index_line(
+                rendered, entry_tokens = _render_index_line(
                     b, label="近期·索引", emoji="🌱", note=note
                 )
                 if entry_tokens > token_budget:
@@ -558,7 +584,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
         )
         top = digest_pool[0]
         try:
-            rendered, entry_tokens = render_stored_bucket(
+            rendered, entry_tokens = _render_stored_bucket(
                 top, f"📖 [印象] [bucket_id:{top['id']}]", _footprint(top)
             )
             if entry_tokens <= token_budget:
@@ -708,7 +734,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
     for b in candidates:
         try:
             score = rt.decay_engine.calculate_score(b["metadata"])
-            rendered, entry_tokens = render_stored_bucket(
+            rendered, entry_tokens = _render_stored_bucket(
                 b,
                 f"[权重:{score:.2f}] [bucket_id:{b['id']}]",
                 _footprint(b),
@@ -729,7 +755,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
         tech_sorted = sorted(tech_pool, key=_sort_key, reverse=True)[:max(0, tech_max)]
         for b in tech_sorted:
             try:
-                rendered, entry_tokens = render_index_line(b)
+                rendered, entry_tokens = _render_index_line(b)
                 if entry_tokens > token_budget:
                     primary_omitted += 1
                     continue
@@ -808,7 +834,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
             random.shuffle(passive_pool)
             for b in passive_pool[:2]:
                 try:
-                    rendered, entry_tokens = render_stored_bucket(
+                    rendered, entry_tokens = _render_stored_bucket(
                         b,
                         f"💤 [久未浮现] [bucket_id:{b['id']}]",
                         _footprint(b),
@@ -845,7 +871,7 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
                 random.shuffle(resolved_pool)
                 for b in resolved_pool[:3]:
                     try:
-                        rendered, entry_tokens = render_stored_bucket(
+                        rendered, entry_tokens = _render_stored_bucket(
                             b,
                             f"✨ [偶遇] [bucket_id:{b['id']}]",
                             _footprint(b),
@@ -886,4 +912,4 @@ async def _surface_layered(max_results: int, max_tokens: int, tag_filter: list) 
                 limit=max_tokens,
             )
         )
-    return "\n\n".join(parts)
+    return _wrap_surface_results("\n\n".join(parts))
