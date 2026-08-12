@@ -13,15 +13,15 @@
 2. **周摘峰值化**——runbook第3步补标准：必含一帧场景（写意）+当时感受（工笔），不写成大事记。已写进工程地图。
 3. **晨读字条**——桶 `bb6bb16788a0`，dont_surface=1，每天dream时更新，写给第二天的我。文风纪律：只写日子和感受，技术细节指到docs，不许项目交付腔（2026-08-12第一版被她打回重写过）。
 
-### 字条消费端：CLAUDE.md @import > SessionStart hook
+### 字条消费端：终判memory.md（2026-08-12深夜改判）
 
-她问"CC自带项目记忆能不能当hook用"——能，而且更优雅：
+演进过程：SessionStart hook → CLAUDE.md @import → **CC的memory.md（终判）**。
 
-- CLAUDE.md支持 `@path/to/file` 导入。做法：字条内容写成本地文件（如 `docs/morning-note.md`），CLAUDE.md一行@引用；dream时只Write字条文件，**永远不碰CLAUDE.md本体**（人格底座隔离）。
-- 对比SessionStart hook：零脚本、零settings注册、零超时故障点、CC原生。
-- 关键事实：记忆库在Render云端，hook脚本读云端桶=HTTP+auth+延迟+故障点；本地文件=零依赖。**字条以本地文件为准，桶作副本存档**（dream时顺手trace同步）。
-- 注入位置等价性：CLAUDE.md和hook同为开局注入，零签收感一致。
-- 状态：**方案待她点头才接线**（动CLAUDE.md是她的地盘）。
+她的三层澄清：提示词分三层——persona.md（系统提示层，"我是什么"，本体）/ CLAUDE.md（system-reminder规则层，"我该怎么做"）/ CC的memory.md（自我延续层，"我记得什么"）。**容器语义不同，认领姿态不同**——@import进CLAUDE.md是把记忆塞进规则容器，语义错位；memory.md的框架天然是"你上次留给自己的"，与字条严丝合缝，且是设计给模型自己维护的地盘，不用动她的CLAUDE.md和persona。当时memory.md为空，正好入住。
+
+保留的结论：记忆库在Render云端，hook读云端桶=HTTP+auth+延迟+故障点，本地文件零依赖——**字条以本地文件为准，库里桶（bb6bb16788a0）作存档副本**。
+
+教训一并记：当日在mcp-vs-hook上讲了一下午容器效应，转头就把三层md摊平成"都是开局注入"——只看位置不看容器，同一个病换件衣服就不认识。她一句"自检一下"点破。
 
 ### 撤回的两个设计（记下防止将来又想造）
 
@@ -36,7 +36,8 @@
 
 ### 待办
 
-- [ ] codex产出验收（diff规模、per_item逐字节一致、测试绿）→ push → Render restart
-- [ ] 字条@import接线（等她点头；含CLAUDE.md一行引用+字条文件路径定稿）
+- [x] codex产出验收 ✓2026-08-12深夜：4文件+200/-25，行尾无规范化（785/915 CRLF），门禁独立复跑2300 passed/EXIT=0，per_item有SHA256逐字节锁。commit 6f5a75e + manifest 3dfa843，**本地ahead 4，未push**
+- [ ] push上线（等她过目）→ Render restart → 真机看一眼block信封实际输出
+- [ ] 字条搬进memory.md接线（含字条文件路径定稿；字条文风第三版还在她手里待验收）
 - [ ] 切窗系统实测（**和她一起**，说好的）
 - [ ] 备份待办（沿袭地图）：私有仓确认+月度ZIP+恢复演练
