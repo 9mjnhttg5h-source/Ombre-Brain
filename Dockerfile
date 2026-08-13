@@ -52,6 +52,7 @@ COPY src/ ./src/
 COPY frontend/ ./frontend/
 COPY VERSION ./VERSION
 COPY config.example.yaml ./config.default.yaml
+COPY style_lint.yaml ./style_lint.yaml
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
