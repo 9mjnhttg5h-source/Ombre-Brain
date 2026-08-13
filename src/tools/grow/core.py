@@ -36,11 +36,13 @@ except ImportError:  # pragma: no cover - 包内导入兜底
 
 from .. import _runtime as rt
 from .._common import (
+    STYLE_LINT_REJECTION,
     merge_or_create,
     check_content_size,
     check_grow_items_payload,
     check_duplicate_for,
     check_plan_resolution,
+    style_lint_rejection,
 )
 
 
@@ -63,6 +65,10 @@ async def grow_core(content: str) -> str:
     if payload_err:
         rt.logger.warning(f"grow digest output rejected: {payload_err}")
         return payload_err
+    for item in items:
+        rejection = style_lint_rejection(item.get("content", ""))
+        if rejection:
+            return rejection
 
     # iter 2.0 来源追踪：同一次 grow 拆出的所有桶共享同一个 batch_id，
     # dashboard 可按 grow_batch_id 聚合显示「这次日记一共归档了哪些事件」。
@@ -92,6 +98,8 @@ async def grow_core(content: str) -> str:
                 source_tool="grow",
                 grow_batch_id=batch_id,
             )
+            if result_name == STYLE_LINT_REJECTION:
+                return STYLE_LINT_REJECTION
             if embed_warn and embed_warn not in embed_warnings:
                 embed_warnings.append(embed_warn)
 
@@ -145,6 +153,10 @@ async def grow_items(items: list, source_content: str = "") -> str:
             clean.append(item)
     if not clean:
         return "items 为空或都不合法，未创建任何桶。"
+    for item in clean:
+        rejection = style_lint_rejection(item["content"])
+        if rejection:
+            return rejection
     if not source_content.strip() and any(
         item.get("source_ranges") not in (None, [], "") for item in clean
     ):
@@ -256,6 +268,8 @@ async def grow_items(items: list, source_content: str = "") -> str:
                 grow_batch_id=batch_id,
                 raw_merge=True,  # 逐字追加，合并不压缩
             )
+            if result_name == STYLE_LINT_REJECTION:
+                return STYLE_LINT_REJECTION
             if embed_warn and embed_warn not in embed_warnings:
                 embed_warnings.append(embed_warn)
             if is_merged:

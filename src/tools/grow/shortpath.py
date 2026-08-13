@@ -29,7 +29,12 @@ except ImportError:  # pragma: no cover - 包内导入兜底
     from ...errors import PublicToolError  # type: ignore
 
 from .. import _runtime as rt
-from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
+from .._common import (
+    STYLE_LINT_REJECTION,
+    merge_or_create,
+    check_duplicate_for,
+    check_plan_resolution,
+)
 
 
 async def grow_shortpath(content: str) -> str:
@@ -61,6 +66,8 @@ async def grow_shortpath(content: str) -> str:
         source_tool="grow",
         grow_batch_id=batch_id,
     )
+    if result_name == STYLE_LINT_REJECTION:
+        return STYLE_LINT_REJECTION
     action = "合并" if is_merged else "新建"
     asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
     if not is_merged:

@@ -59,6 +59,7 @@ from utils import get_version, load_config, setup_logging
 # 真正的工具逻辑在 tools/breath, tools/hold, tools/grow, tools/trace,
 # tools/anchor, tools/plan, tools/dream 里，便于单独阅读和修改。
 from tools import _runtime as _tools_runtime
+from tools import _common as _tools_common
 from tools import breath as _t_breath
 from tools import hold as _t_hold
 from tools import grow as _t_grow
@@ -580,6 +581,16 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
     # 正常路径
     if op:
         _log_op_ok(op, result)
+    if result == _tools_common.STYLE_LINT_REJECTION:
+        try:
+            pop_warnings()
+        except Exception:
+            pass
+        try:
+            _pop_deletion_notice()
+        except Exception:
+            pass
+        return result
     try:
         extras = format_warnings_suffix(pop_warnings())
     except Exception:

@@ -34,10 +34,13 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import AsyncExitStack, asynccontextmanager
 import hashlib
 import math
+from pathlib import Path
 import threading
 
+import yaml
+
 from bucket_manager import _filesystem_turn as _kernel_filesystem_turn
-from utils import normalize_memory_title, now_iso, parse_bool
+from utils import config_file_path, normalize_memory_title, now_iso, parse_bool
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
 from . import _runtime as rt
@@ -46,6 +49,64 @@ _EMBED_WARN = (
     "向量暂未完成，该桶当前仅支持关键词匹配；正文已保存。"
     "请检查向量队列与 embedding 提供商配置后重试补齐。"
 )
+
+STYLE_LINT_REJECTION = "这条先放着，换个说法再存一次。"
+
+
+def _style_lint_paths() -> tuple[Path, ...]:
+    """按数据盘同目录优先、仓库文件兜底的顺序返回词表候选。"""
+    active_config = Path(config_file_path()).resolve()
+    repo_fallback = Path(__file__).resolve().parents[2] / "style_lint.yaml"
+    paths = (active_config.with_name("style_lint.yaml"), repo_fallback)
+    return tuple(dict.fromkeys(paths))
+
+
+def _load_style_lint_terms() -> frozenset[str]:
+    """读取词表；解析问题只记门房日志，不把配置内容带进工具返回。"""
+    for path in _style_lint_paths():
+        if not path.is_file():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = yaml.safe_load(handle) or {}
+            families = payload.get("families", {}) if isinstance(payload, dict) else {}
+            if not isinstance(families, dict):
+                raise ValueError("invalid families")
+            return frozenset(
+                term.strip()
+                for terms in families.values()
+                if isinstance(terms, list)
+                for term in terms
+                if isinstance(term, str) and term.strip()
+            )
+        except (OSError, UnicodeError, yaml.YAMLError, ValueError, TypeError):
+            logger = getattr(rt, "logger", None)
+            if logger is not None:
+                logger.warning(
+                    "style lint vocabulary unavailable; check server-side configuration"
+                )
+            return frozenset()
+    return frozenset()
+
+
+def style_lint_rejection(content: str, *, test_data: bool = False) -> str:
+    """命中阈值时只返回固定话术；放行时返回空串。"""
+    if test_data:
+        return ""
+    config = rt.config if isinstance(rt.config, dict) else {}
+    style_config = config.get("style_lint", {}) or {}
+    if not isinstance(style_config, dict):
+        style_config = {}
+    if not parse_bool(style_config.get("enabled", True), default=True):
+        return ""
+
+    matches = 0
+    text = str(content or "")
+    for term in _load_style_lint_terms():
+        matches += text.count(term)
+        if matches >= 2:
+            return STYLE_LINT_REJECTION
+    return ""
 
 # ============================================================
 # 常量 / Named constants
@@ -733,6 +794,9 @@ async def merge_or_create(
     F-01 / F-08 fix：整个 search→create 路径在 per-content-hash Lock 下串行执行。
     同内容并发调用时后到的协程会阻塞，等前者写完后直接走合并分支，不产生重复桶。
     """
+    rejection = style_lint_rejection(content, test_data=test_data)
+    if rejection:
+        return rejection, False, ""
     async with _content_turn(content):
         result = await _merge_or_create_inner(
             content=content, tags=tags, importance=importance, domain=domain,

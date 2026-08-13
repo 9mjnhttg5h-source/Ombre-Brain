@@ -25,7 +25,11 @@ from typing import Optional
 from ombrebrain.storage.source_store import normalize_source_ranges
 
 from .. import _runtime as rt
-from .._common import check_grow_input_size, check_grow_items_payload
+from .._common import (
+    check_grow_input_size,
+    check_grow_items_payload,
+    style_lint_rejection,
+)
 from .shortpath import grow_shortpath
 from .core import grow_core, grow_items
 
@@ -139,6 +143,11 @@ async def dispatch(content: str = "", items: Optional[list] = None) -> str:
         err = check_grow_items_payload(items)
         if err:
             return err
+        for item in items:
+            item_content = item if isinstance(item, str) else item.get("content", "")
+            rejection = style_lint_rejection(item_content)
+            if rejection:
+                return rejection
         if content and content.strip():
             err = check_grow_input_size(content)
             if err:
@@ -156,5 +165,8 @@ async def dispatch(content: str = "", items: Optional[list] = None) -> str:
         return err
 
     if len(content.strip()) < 30:
+        rejection = style_lint_rejection(content.strip())
+        if rejection:
+            return rejection
         return await grow_shortpath(content)
     return await grow_core(content)

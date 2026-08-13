@@ -30,6 +30,7 @@ from .._common import (
     check_content_size,
     check_metadata_size,
     enforce_pinned_quota,
+    style_lint_rejection,
 )
 from .feel import store_feel
 from .pinned import store_pinned
@@ -122,6 +123,10 @@ async def dispatch(
     err = check_content_size(content)
     if err:
         return err
+
+    rejection = style_lint_rejection(content, test_data=test_data)
+    if rejection:
+        return rejection
 
     # importance 越界 clamp 由 bucket_manager 接管（OB-W001 自动 push 到 channel）；
     # 这里仅做一次软 clamp 便于配额判断。

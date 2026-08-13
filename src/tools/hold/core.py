@@ -30,7 +30,12 @@ import asyncio
 from utils import normalize_memory_title
 
 from .. import _runtime as rt
-from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
+from .._common import (
+    STYLE_LINT_REJECTION,
+    merge_or_create,
+    check_duplicate_for,
+    check_plan_resolution,
+)
 
 
 async def store_core(
@@ -92,6 +97,8 @@ async def store_core(
         media=media,
         test_data=test_data,
     )
+    if result_name == STYLE_LINT_REJECTION:
+        return STYLE_LINT_REJECTION
 
     action = "合并→" if is_merged else "新建→"
     asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
