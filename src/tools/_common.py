@@ -63,6 +63,25 @@ def _style_lint_paths() -> tuple[Path, ...]:
     return tuple(dict.fromkeys(paths))
 
 
+_style_lint_health_logged = False
+
+
+def _log_style_lint_health(term_count: int, path: Path) -> None:
+    """首次成功加载时打一行健康口日志（只进服务端日志，不进工具返回）。
+
+    08-13空名单事故的刻线：静默失败设计必须配显式健康口，
+    否则词表缺失/为空只能靠生产烟测踹门才能发现。
+    """
+    global _style_lint_health_logged
+    if _style_lint_health_logged:
+        return
+    _style_lint_health_logged = True
+    logger = getattr(rt, "logger", None)
+    info = getattr(logger, "info", None)
+    if callable(info):
+        info(f"op=style_lint action=load terms={term_count} source={path.name}")
+
+
 def _load_style_lint_terms() -> frozenset[str]:
     """读取词表；解析问题只记门房日志，不把配置内容带进工具返回。"""
     for path in _style_lint_paths():
@@ -74,13 +93,15 @@ def _load_style_lint_terms() -> frozenset[str]:
             families = payload.get("families", {}) if isinstance(payload, dict) else {}
             if not isinstance(families, dict):
                 raise ValueError("invalid families")
-            return frozenset(
+            terms = frozenset(
                 term.strip()
                 for terms in families.values()
                 if isinstance(terms, list)
                 for term in terms
                 if isinstance(term, str) and term.strip()
             )
+            _log_style_lint_health(len(terms), path)
+            return terms
         except (OSError, UnicodeError, yaml.YAMLError, ValueError, TypeError):
             logger = getattr(rt, "logger", None)
             if logger is not None:
@@ -88,7 +109,20 @@ def _load_style_lint_terms() -> frozenset[str]:
                     "style lint vocabulary unavailable; check server-side configuration"
                 )
             return frozenset()
+    _warn_style_lint_missing()
     return frozenset()
+
+
+def _warn_style_lint_missing() -> None:
+    """所有候选路径都无词表：门房兜里没名单，必须喊出来（08-13事故的静默路径）。"""
+    global _style_lint_health_logged
+    if _style_lint_health_logged:
+        return
+    _style_lint_health_logged = True
+    logger = getattr(rt, "logger", None)
+    warning = getattr(logger, "warning", None)
+    if callable(warning):
+        warning("op=style_lint action=load terms=0 source=missing — 词表文件不存在，门房空手上岗")
 
 
 def _write_style_lint_quarantine(
