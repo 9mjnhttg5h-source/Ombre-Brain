@@ -124,7 +124,9 @@ async def dispatch(
     if err:
         return err
 
-    rejection = style_lint_rejection(content, test_data=test_data)
+    rejection = style_lint_rejection(
+        content, test_data=test_data, source_tool="hold"
+    )
     if rejection:
         return rejection
 

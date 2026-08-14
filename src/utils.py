@@ -422,6 +422,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
         "merge_threshold": 75,
         "style_lint": {
             "enabled": True,
+            "count_mode": "distinct",
         },
         "dehydration": {
             "model": "gemini-2.0-flash",

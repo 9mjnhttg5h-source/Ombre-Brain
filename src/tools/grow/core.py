@@ -66,7 +66,9 @@ async def grow_core(content: str) -> str:
         rt.logger.warning(f"grow digest output rejected: {payload_err}")
         return payload_err
     for item in items:
-        rejection = style_lint_rejection(item.get("content", ""))
+        rejection = style_lint_rejection(
+            item.get("content", ""), source_tool="grow"
+        )
         if rejection:
             return rejection
 
@@ -154,7 +156,7 @@ async def grow_items(items: list, source_content: str = "") -> str:
     if not clean:
         return "items 为空或都不合法，未创建任何桶。"
     for item in clean:
-        rejection = style_lint_rejection(item["content"])
+        rejection = style_lint_rejection(item["content"], source_tool="grow")
         if rejection:
             return rejection
     if not source_content.strip() and any(

@@ -37,6 +37,22 @@ def test_collect_files_keeps_paths_not_all_file_bodies(tmp_path):
     assert all(isinstance(path, str) for path in files._paths.values())
 
 
+def test_collect_files_excludes_style_lint_quarantine(tmp_path):
+    quarantine = tmp_path / "_lint_quarantine"
+    quarantine.mkdir()
+    (quarantine / "20260814-010203Z-deadbeef.md").write_text(
+        "rejected content", encoding="utf-8"
+    )
+    dynamic = tmp_path / "dynamic"
+    dynamic.mkdir()
+    (dynamic / "memory.md").write_text("stored memory", encoding="utf-8")
+
+    sync = GitHubSync(token="t", repo="owner/repo")
+    files = sync._collect_files(str(tmp_path))
+
+    assert set(files) == {"dynamic/memory.md"}
+
+
 def test_collect_files_includes_content_addressed_source_evidence(tmp_path):
     ref = SourceStore(tmp_path).put("需要与 Markdown 一起备份的原文")
     sync = GitHubSync(token="t", repo="owner/repo")

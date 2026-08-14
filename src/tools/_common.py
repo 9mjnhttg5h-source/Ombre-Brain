@@ -34,8 +34,10 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import AsyncExitStack, asynccontextmanager
 import hashlib
 import math
+import os
 from pathlib import Path
 import threading
+from datetime import datetime, timezone
 
 import yaml
 
@@ -50,7 +52,7 @@ _EMBED_WARN = (
     "请检查向量队列与 embedding 提供商配置后重试补齐。"
 )
 
-STYLE_LINT_REJECTION = "这条先放着，换个说法再存一次。"
+STYLE_LINT_REJECTION = "这条先放着。检查一下自己不合适的比喻，换个说法再存一次。"
 
 
 def _style_lint_paths() -> tuple[Path, ...]:
@@ -89,8 +91,50 @@ def _load_style_lint_terms() -> frozenset[str]:
     return frozenset()
 
 
-def style_lint_rejection(content: str, *, test_data: bool = False) -> str:
-    """命中阈值时只返回固定话术；放行时返回空串。"""
+def _write_style_lint_quarantine(
+    content: str, hits: dict[str, int], *, source_tool: str = ""
+) -> None:
+    """把拒收正文留在数据盘门房；不让正文或词表进入工具返回。"""
+    config = rt.config if isinstance(rt.config, dict) else {}
+    buckets_dir = (
+        os.environ.get("OMBRE_BUCKETS_DIR", "").strip()
+        or str(config.get("buckets_dir") or "").strip()
+        or str(Path(config_file_path()).resolve().parent)
+    )
+    quarantine_dir = Path(buckets_dir) / "_lint_quarantine"
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    content_bytes = content.encode("utf-8")
+    timestamp = datetime.now(timezone.utc)
+    timestamp_iso = timestamp.isoformat(timespec="seconds").replace("+00:00", "Z")
+    digest = hashlib.sha256(content_bytes).hexdigest()
+    filename = f"{timestamp:%Y%m%d-%H%M%SZ}-{digest[:8]}.md"
+    source = str(source_tool or "unknown").strip() or "unknown"
+    hit_summary = ",".join(f"{term}x{count}" for term, count in hits.items())
+    header = (
+        "# Style lint quarantine\n\n"
+        f"- time: {timestamp_iso}\n"
+        f"- source_tool: {source}\n"
+        f"- hits: {hit_summary}\n"
+        f"- hit_total: {sum(hits.values())}\n"
+        f"- content_bytes: {len(content_bytes)}\n\n"
+        "## Content\n\n"
+    )
+    (quarantine_dir / filename).write_bytes(header.encode("utf-8") + content_bytes)
+
+    logger = getattr(rt, "logger", None)
+    info = getattr(logger, "info", None)
+    if callable(info):
+        info(
+            f"op=style_lint action=reject hits={hit_summary} "
+            f"len={len(content_bytes)} file={filename}"
+        )
+
+
+def style_lint_rejection(
+    content: str, *, test_data: bool = False, source_tool: str = ""
+) -> str:
+    """命中阈值时留门房病历，只向工具返回固定话术。"""
     if test_data:
         return ""
     config = rt.config if isinstance(rt.config, dict) else {}
@@ -100,13 +144,19 @@ def style_lint_rejection(content: str, *, test_data: bool = False) -> str:
     if not parse_bool(style_config.get("enabled", True), default=True):
         return ""
 
-    matches = 0
     text = str(content or "")
-    for term in _load_style_lint_terms():
-        matches += text.count(term)
-        if matches >= 2:
-            return STYLE_LINT_REJECTION
-    return ""
+    hits = {
+        term: count
+        for term in sorted(_load_style_lint_terms())
+        if (count := text.count(term)) > 0
+    }
+    count_mode = str(style_config.get("count_mode", "distinct")).strip().lower()
+    match_count = sum(hits.values()) if count_mode == "total" else len(hits)
+    if match_count < 2:
+        return ""
+
+    _write_style_lint_quarantine(text, hits, source_tool=source_tool)
+    return STYLE_LINT_REJECTION
 
 # ============================================================
 # 常量 / Named constants
@@ -794,7 +844,9 @@ async def merge_or_create(
     F-01 / F-08 fix：整个 search→create 路径在 per-content-hash Lock 下串行执行。
     同内容并发调用时后到的协程会阻塞，等前者写完后直接走合并分支，不产生重复桶。
     """
-    rejection = style_lint_rejection(content, test_data=test_data)
+    rejection = style_lint_rejection(
+        content, test_data=test_data, source_tool=source_tool
+    )
     if rejection:
         return rejection, False, ""
     async with _content_turn(content):

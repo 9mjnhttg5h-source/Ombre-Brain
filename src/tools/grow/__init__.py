@@ -145,7 +145,7 @@ async def dispatch(content: str = "", items: Optional[list] = None) -> str:
             return err
         for item in items:
             item_content = item if isinstance(item, str) else item.get("content", "")
-            rejection = style_lint_rejection(item_content)
+            rejection = style_lint_rejection(item_content, source_tool="grow")
             if rejection:
                 return rejection
         if content and content.strip():
@@ -165,7 +165,7 @@ async def dispatch(content: str = "", items: Optional[list] = None) -> str:
         return err
 
     if len(content.strip()) < 30:
-        rejection = style_lint_rejection(content.strip())
+        rejection = style_lint_rejection(content.strip(), source_tool="grow")
         if rejection:
             return rejection
         return await grow_shortpath(content)

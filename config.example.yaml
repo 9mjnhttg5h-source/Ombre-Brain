@@ -162,6 +162,7 @@ matching:
 # 词表只放 style_lint.yaml；活动 config.yaml 同目录文件优先，且每次入库重新读取。
 style_lint:
   enabled: true
+  count_mode: distinct            # distinct (default) counts unique terms; total restores V1 occurrence counting
 
 # --- Surfacing defaults / 浮现默认参数 ---
 # Defaults applied when the AI calls breath() without explicit caps.

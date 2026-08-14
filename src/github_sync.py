@@ -115,9 +115,18 @@ def _is_source_relative_path(relative_path: str) -> bool:
     )
 
 
+def _is_lint_quarantine_relative_path(relative_path: str) -> bool:
+    parts = str(relative_path).replace("\\", "/").split("/")
+    return bool(parts and parts[0] == "_lint_quarantine")
+
+
 def _is_backup_relative_path(relative_path: str) -> bool:
-    return str(relative_path).endswith(".md") or _is_source_relative_path(
-        relative_path
+    return bool(
+        not _is_lint_quarantine_relative_path(relative_path)
+        and (
+            str(relative_path).endswith(".md")
+            or _is_source_relative_path(relative_path)
+        )
     )
 
 
@@ -149,6 +158,9 @@ def _iter_backup_paths(root_dir: str) -> Iterator[str]:
                 # Match os.walk(..., followlinks=False): recurse into real
                 # directories, but never follow a symlinked directory tree.
                 if entry.is_dir(follow_symlinks=False):
+                    relative = os.path.relpath(entry.path, root_dir).replace("\\", "/")
+                    if _is_lint_quarantine_relative_path(relative):
+                        continue
                     try:
                         iterators.append(os.scandir(entry.path))
                     except OSError as exc:
