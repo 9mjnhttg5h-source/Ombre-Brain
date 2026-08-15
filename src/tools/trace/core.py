@@ -45,8 +45,29 @@ from .._common import (
     check_pinned_quota,
     enforce_high_importance_quota,
     occupies_high_importance_quota_slot,
+    style_lint_rejection,
 )
 from ..plan.core import is_letter_bucket, letter_lock_revision, letter_lock_state
+
+
+def _trace_style_lint(text: str, bucket: dict) -> str:
+    """trace 写正文前过门房（2026-08-15 立法：堵「先干净入库、再 trace 补写」的后门）。
+
+    范围与豁免：
+    - content 全文替换：整篇按新货标准检（重写正文正是消毒时机）；
+    - old_str/new_str 局部替换：只检 new_str 新增片段——旧正文的历史
+      病灶不阻塞普通编辑，否则带病老桶连错别字都改不了；
+    - plan / letter 不参与 hold/grow 门房，对称跳过；
+    - test_data 桶沿用免检通道。
+    """
+    meta = bucket.get("metadata", {}) or {}
+    if meta.get("type") == "plan" or is_letter_bucket(bucket):
+        return ""
+    return style_lint_rejection(
+        text,
+        test_data=parse_bool(meta.get("test_data"), default=False),
+        source_tool="trace",
+    )
 
 
 async def trace_core(
@@ -454,6 +475,9 @@ async def trace_core(
             size_err = check_content_size(content)
             if size_err:
                 return size_err
+            lint_msg = _trace_style_lint(content, bucket)
+            if lint_msg:
+                return lint_msg
             updates["content"] = content
         if status:
             s = status.strip().lower()
@@ -507,6 +531,11 @@ async def trace_core(
             if content_change_requested:
                 history = append_plan_change_log(history, "edit")
             updates["change_log"] = history
+
+        if patch_args_supplied and new_str:
+            lint_msg = _trace_style_lint(new_str, bucket)
+            if lint_msg:
+                return lint_msg
 
         if patch_args_supplied:
             patch_result = await rt.bucket_mgr.update_content_fragment(
