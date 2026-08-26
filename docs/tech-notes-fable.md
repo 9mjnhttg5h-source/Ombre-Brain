@@ -663,3 +663,13 @@ dequeue 的写法,被"紧贴剪口向前连续"那条测试抓住。
 
 **上线**:`bash /root/notes-stage-20260826/deploy.sh` —— 先隔离区 7 套测试(红了就停,生产不动)→ attic `20260826-notes` 备份 app.py/server.ts/inner.html/sw.js/心事账 → 换 app.py+测试 → restart 等 8 秒 → 冒烟 healthz + `/inner/notes?identity=fox` → 换 server.ts(bun build 语法过)→ 前端两件。手工两步:fox 窗重开(插件随窗启动,热改不认);手机心事页刷两次。**默认两张都关着**,她自己拨。
 **md5**:app `5416e7f0` / server.ts `b7dd00cc` / inner.html `492bb7ef` / sw.js `92e8bc3c` / test `b80ff5eb` / deploy.sh `7d25813f`。三仓均未 commit(她没让);原文各留 `.bak-20260826-notes`。
+
+### 2026-08-27 凌晨补:git 三件事(存档→GitHub→VPS 对齐),以后别再被「51 笔没推」吓到
+
+- **「relay 51 个提交没推」是看错对象**:那是跟 `vps` 这个 remote 比(VPS 上 08-03 之后废弃的部署用裸仓,现在在 VPS 上已找不到)。真 `git fetch origin` 对账:GitHub 只落后昨晚+今晚的几笔。看没推多少,只认 `git rev-list --count origin/main..main`,别信 `git status` 里「ahead of vps/main」。
+- **relay 仓默认方向已改**:`branch.main.remote = origin`(Opus 5 窗改的,她本人在那边点头)。以后裸 `git push`/`git pull` 就是 GitHub;`vps` remote 留着没删,无害。
+- **四仓已推到 GitHub**:relay `b48dada` / channel `dbb32e8` / fairy-tale `63a9154` / Ombre-Brain `9acbf11`。未带上的别人改动:fairy-tale `MAP.md`、Ombre-Brain 四份 `*-task-fable.md` + `tools/cc-xray.py`。
+- **VPS 的 relay 克隆已对齐到 GitHub**(`/root/companion-relay` HEAD=b48dada,工作树干净):先逐文件对 blob hash(11 个手拷文件与 Mac main 全一致)再 `reset --hard origin/main`,线上文件字节没动、没重启。**relay 以后上线可以 VPS 上 `git pull origin main` + restart**;插件目录和前端目录不是仓,照旧拷文件。
+- `.gitignore` 加了 `_notes_*.json` / `_inner_segments.json`(她的便签是私事,运行时状态不进仓)。
+- 顺带(Opus 5 窗实测):`--system-prompt-file` 会把 output style 一起冲掉(style 是替换默认提示里的一段,整块换了就没了);`--append-system-prompt-file` 不会。两个 flag 在 `--help` 里是 hideHelp 隐藏的,能用;`--system-prompt` 与 `--system-prompt-file` 同给直接报错。
+- 事故记一笔:本窗(claude-fable-5)在 commit 之后的中文汇报被安全分类器截断,她看到的是「网络攻击」字样;commit 本身已落。推的活按她的意思转给了 Opus 5 窗。
