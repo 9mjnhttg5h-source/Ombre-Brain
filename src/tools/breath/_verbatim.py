@@ -4,6 +4,7 @@ This module is intentionally small so the compatibility patch can be removed
 without touching retrieval, ranking, or bucket storage.
 """
 
+import os
 import secrets
 
 from utils import count_tokens_approx
@@ -141,6 +142,16 @@ def render_stored_bucket(
         rendered = f"{metadata_header} {boundary}{miss_block}\n{content}"
     else:
         rendered = f"{metadata_header}{miss_block}\n{content}"
-    if footprint:
+    if footprint and footprint_enabled():
         rendered += f"\n{footprint}"
     return rendered, count_tokens_approx(rendered)
+
+
+def footprint_enabled() -> bool:
+    """breath/breath_search 输出里那行「👣 Footprint：…」（事件足迹：创建 → 正文重构×N → 更新）要不要带。
+
+    2026-08-27 她说这行是上游加的、没必要看：环境变量 OMBRE_BREATH_FOOTPRINT=0/false/off 就不带。
+    默认带（不改任何现有部署的行为）；足迹本身照旧记在事件账本里，只是不往模型眼前放。
+    """
+    raw = os.environ.get("OMBRE_BREATH_FOOTPRINT", "").strip().lower()
+    return raw not in ("0", "false", "off", "no")
