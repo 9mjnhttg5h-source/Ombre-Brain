@@ -1008,3 +1008,4 @@ dequeue 的写法,被"紧贴剪口向前连续"那条测试抓住。
 - **署名分流（她定的）**：`routes/well.py` `WELL_PAIRS = {fable: (fable, 小白), fox: (fox, 小兔, ori)}`，大小写不分；别的马甲两边都给、谁先看到算谁的。`GET /well/unseen?viewer=ai&identity=`、`POST /well/seen {viewer:ai, ids, identity}`；不带 identity 的老口子和她那边（viewer=her）原样。
 - **验证**：`test_well.py` 18 项（分流、唤醒带井+标看过、她的回复带 parent、按条标）、`test_airdrop_codex.py` 38 项（补 to 的四条）、wake 三套 ok，Mac 与 VPS 生产 venv 都绿。VPS `git pull --ff-only` + restart，healthz 200，两张表的新列都在。前端 v93、公网核过。
 - **坑**：① 唤醒投给插件的是信封不是 msg，测试里把队列项整个 json.dumps 再搜字；② `written_label` 当天也缀「写于 N 小时前」，测试按首行匹配；③ test 起 app 必须先 `app.init_db()`。
+- **她补一句"他给我的问题我的回答也要能看"**：分流改成**回复跟着串的主人走**——串顶是谁的（他问的 / 她署名给谁的），底下回复都归谁，不看她那次挂的署名（她的署名框记着上次的，回 Fox 时多半还是「小白」）；串顶没归属（马甲）才看回复自己的署名。唤醒里回复那行引着串顶的头 40 个字：`#15 小白（回 #12 Fox「今晚几点回来」）· 时间：正文`。`unseen_for` 一次把 parent 的 author/text 带出来（`parent_author` / `parent_text`）。test_well 22 项，VPS 生产 venv 绿，relay 已重启。测试里写过 `x in a is False` 这种链式比较，永远是 False——别这么写。
